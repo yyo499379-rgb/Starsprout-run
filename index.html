@@ -52,6 +52,10 @@ const CHARACTERS = [
 const ENEMY_DIM = { walker: [26, 20], spiky: [28, 20], hopper: [24, 22], flyer: [26, 18] };
 const BUFF_NAMES = { fire: "噴火", boom: "迴力刀", star: "無敵", heal: "回復" };
 
+/* 刺客精靈圖（128x64，每格 32x32）：上排＝靜止／空中，下排＝4 格行走 */
+const ASSASSIN_IMG = new Image();
+ASSASSIN_IMG.src = "data:image/png;base64,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";
+
 /* ================= Audio (原創簡易音效與旋律) ================= */
 const Sound = {
   ctx: null, musicOn: true, step: 0, timer: null,
@@ -900,36 +904,27 @@ const Renderer = {
       R(6, 7, 13, 2, "#2c2c34"); R(11, 6, 5, 5, "#5ee0f0"); R(6, 6, 5, 5, "#5ee0f0"); R(12, 7, 2, 2, "#ffffff"); R(7, 7, 2, 2, "#ffffff");
       R(11, -4, 2, 4, "#4fae5a"); R(13, -6, 5, 3, "#7bd98a"); R(7, -4, 4, 3, "#7bd98a");
     } else {
-      const K = "#050508", D = "#16181f", M = "#23262f", L = "#3a3d48", H = "#4c505c", B = "#2a2d36";
-      const moving = onGround && Math.abs(vx) > 20;
-      // 披風尾巴（移動或空中時）
-      if (moving || air) { R(-5, 20, 5, 7, K); R(-4, 21, 4, 5, D); R(-3, 22, 2, 2, M); }
-      // 外輪廓
-      R(4, -1, 16, 1, K); R(3, 0, 18, 13, K); R(2, 12, 20, 5, K); R(0, 16, 24, 7, K); R(-2, 22, 28, 6, K);
-      R(1, 2, 3, 4, K);
-      // 兜帽
-      R(5, 1, 14, 11, D); R(7, 1, 8, 2, L); R(15, 2, 3, 2, M); R(5, 3, 2, 7, M); R(2, 3, 3, 2, D);
-      R(10, 4, 9, 8, "#000000");
-      // 肩膀
-      R(3, 13, 18, 3, D); R(5, 13, 8, 2, L); R(6, 13, 3, 1, H); R(17, 13, 3, 3, M);
-      // 披風本體與斜向條紋
-      R(2, 16, 20, 6, D); R(0, 22, 24, 5, D);
-      R(4, 18, 2, 8, M); R(7, 16, 2, 11, L); R(10, 16, 1, 11, M); R(2, 21, 2, 5, M);
-      R(12, 14, 2, 13, K); R(19, 16, 3, 11, "#101218");
-      R(11, 14, 4, 2, "#7a7d8a");
-      R(0, 26, 24, 1, "#101218");
-      // 長靴
-      const bx1 = sw(4, f), bx2 = sw(13, -f), by2 = 27 - (air ? 1 : 0);
-      R(bx1 - 1, 27, 9, 4, K); R(bx1, 27, 7, 3, B); R(bx1 + 1, 27, 2, 1, H);
-      R(bx2 - 1, by2, 9, 4, K); R(bx2, by2, 7, 3, B); R(bx2 + 1, by2, 2, 1, H);
+      // 刺客：使用內嵌精靈圖（上排：靜止／空中，下排：4 格行走）
+      const img = ASSASSIN_IMG;
+      if (img.complete && img.naturalWidth > 0) {
+        let sx = 0, sy = 0;
+        if (air) { sx = 64; sy = 0; }
+        else if (Math.abs(vx) > 20) { sx = (Math.floor(anim * 0.6) % 4) * 32; sy = 32; }
+        ctx.drawImage(img, sx, sy, 32, 32, -4, -2, 32, 32);
+      } else {
+        R(4, 0, 16, 30, "#16181f");
+      }
     }
     ctx.restore();
   },
   player(game, cx) {
     const p = game.player, ctx = this.ctx;
     for (const q of p.trail) {
-      ctx.globalAlpha = Math.max(0, 0.45 - q.t * 1.8);
-      this.R(q.x - cx, q.y, p.w, p.h, "#4a4d60");
+      ctx.globalAlpha = Math.max(0, 0.5 - q.t * 2);
+      ctx.save();
+      ctx.translate(Math.round(q.x - cx), Math.round(q.y));
+      this.sprite(p.kind, ctx, q.face, 0, false, 0, 1, game.clock);
+      ctx.restore();
     }
     ctx.globalAlpha = 1;
     if (p.inv > 0 && Math.floor(p.inv * 14) % 2 === 0) return;
