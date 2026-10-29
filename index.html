@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>星芽快跑</title>
+<style>
+  html,body{margin:0;position:fixed;inset:0;width:100%;height:100%;background:#0d1b1e;overflow:hidden;overscroll-behavior:none;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:none;}
+  body{display:flex;align-items:center;justify-content:center;}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#000;display:block;outline:none;touch-action:none;}
+  #rot{display:none;position:fixed;inset:0;background:#0d1b1e;color:#ffe36e;z-index:9;align-items:center;justify-content:center;
+    text-align:center;font:bold 22px/1.6 'Microsoft JhengHei','PingFang TC','Noto Sans TC',sans-serif;}
+  @media (orientation:portrait) and (pointer:coarse){#rot{display:flex;}}
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="540" tabindex="0"></canvas>
+<div id="rot">📱 請將裝置橫向持握<br>再繼續遊玩</div>
+<script>
+"use strict";
+/* ================= CONFIG ================= */
+const CONFIG = {
+  width: 960, height: 540, tileSize: 32,
+  levelCols: 160, levelRows: 17,
+  fixedStep: 1 / 60, maxStepsPerFrame: 5,
+  walkMaxSpeed: 180, runMaxSpeed: 270,
+  groundAcceleration: 1400, groundDeceleration: 1800,
+  airAcceleration: 1000, airDeceleration: 500,
+  gravity: 1500, jumpVelocity: -520, maxFallSpeed: 700,
+  jumpCutMultiplier: 0.5, coyoteTime: 0.08, jumpBufferTime: 0.10,
+  playerW: 24, playerH: 30,
+  lives: 2, invincibleTime: 1.6, hurtStun: 0.18,
+  stompBounce: -320, stompBounceHeld: -430, stompTolerance: 8,
+  enemyW: 26, enemyH: 20, enemySpeed: 55,
+  maxSubstep: 8, seedScore: 100, bonusScore: 200, stompScore: 200,
+  fallDeathY: 17 * 32 + 80
+};
+
+/* ================= Audio (原創簡易音效與旋律) ================= */
+const Sound = {
+  ctx: null, musicOn: true, step: 0, timer: null,
+  init() {
+    if (!this.ctx) {
+      try { this.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { this.ctx = null; }
+    }
+    if (this.ctx && this.ctx.state === "suspended") { try { this.ctx.resume(); } catch (e) {} }
+  },
+  tone(freq, dur, type, vol, slideTo) {
+    if (!this.ctx) return;
+    try {
+      const t = this.ctx.currentTime, o = this.ctx.createOscillator(), g = this.ctx.createGain();
+      o.type = type || "square"; o.frequency.setValueAtTime(freq, t);
+      if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+      g.gain.setValueAtTime(vol || 0.05, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); g.connect(this.ctx.destination); o.start(t); o.stop(t + dur);
+    } catch (e) {}
+  },
+  play(n) {
+    switch (n) {
+      case "jump": this.tone(300, 0.15, "square", 0.04, 620); break;
+      case "seed": this.tone(880, 0.07, "triangle", 0.06); setTimeout(() => this.tone(1320, 0.1, "triangle", 0.06), 60); break;
+      case "bump": this.tone(140, 0.1, "square", 0.06, 90); break;
+      case "stomp": this.tone(220, 0.12, "square", 0.06, 100); break;
+      case "hurt": this.tone(260, 0.3, "sawtooth", 0.05, 70); break;
+      case "lose": this.tone(300, 0.6, "sawtooth", 0.05, 60); break;
+      case "win": [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => this.tone(f, 0.18, "triangle", 0.07), i * 110)); break;
+    }
+  },
+  startMusic() {
+    if (this.timer || !this.ctx) return;
+    const mel = [392, 0, 440, 523, 440, 0, 392, 330, 349, 0, 392, 440, 392, 0, 330, 0];
+    const bas = [131, 0, 131, 0, 175, 0, 175, 0, 147, 0, 147, 0, 131, 0, 196, 0];
+    this.timer = setInterval(() => {
+      if (!this.musicOn || Game.state !== "play") return;
+      const i = this.step++ % 16;
+      if (mel[i]) this.tone(mel[i], 0.16, "square", 0.018);
+      if (bas[i]) this.tone(bas[i], 0.2, "triangle", 0.035);
+    }, 190);
+  }
+};
+
+/* ================= Input ================= */
+const Input = {
+  down: {}, jumpPressed: false,
+  init() {
+    const block = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"];
+    window.addEventListener("keydown", e => {
+      if (block.includes(e.code)) e.preventDefault();
+      Sound.init(); Sound.startMusic();
+      if (e.repeat) return;
+      this.down[e.code] = true;
+      if (e.code === "Space" || e.code === "KeyZ") { if (Game.state === "play") this.jumpPressed = true; }
+      Game.onKey(e.code);
+    }, { passive: false });
+    window.addEventListener("keyup", e => {
+      if (block.includes(e.code)) e.preventDefault();
+      this.down[e.code] = false;
+    }, { passive: false });
+    window.addEventListener("blur", () => { this.clear(); Game.pauseIfPlaying(); });
+    document.addEventListener("visibilitychange", () => { if (document.hidden) { this.clear(); Game.pauseIfPlaying(); } });
+  },
+  clear() { this.down = {}; this.jumpPressed = false; Touch.ptr = {}; },
+  get left() { return !!(this.down.ArrowLeft || this.down.KeyA || Touch.has("left")); },
+  get right() { return !!(this.down.ArrowRight || this.down.KeyD || Touch.has("right")); },
+  get run() { return !!(this.down.ShiftLeft || this.down.ShiftRight || Touch.has("run")); },
+  get jumpHeld() { return !!(this.down.Space || this.down.KeyZ || Touch.has("jump")); }
+};
+
+/* ================= Touch (手機／平板觸控) ================= */
+const Touch = {
+  enabled: false, ptr: {},
+  held: ["left", "right", "run", "jump"],
+  btns: {
+    left:    { x: 24,  y: 408, w: 104, h: 104, label: "◀" },
+    right:   { x: 144, y: 408, w: 104, h: 104, label: "▶" },
+    run:     { x: 684, y: 432, w: 100, h: 84,  label: "跑" },
+    jump:    { x: 804, y: 388, w: 134, h: 128, label: "跳" },
+    pause:   { x: 900, y: 48,  w: 48,  h: 48,  label: "Ⅱ" },
+    restart: { x: 846, y: 48,  w: 48,  h: 48,  label: "↻" }
+  },
+  init(canvas) {
+    this.canvas = canvas;
+    const opt = { passive: false };
+    canvas.addEventListener("pointerdown", e => this.down(e), opt);
+    canvas.addEventListener("pointermove", e => this.move(e), opt);
+    canvas.addEventListener("pointerup", e => this.up(e), opt);
+    canvas.addEventListener("pointercancel", e => this.up(e), opt);
+    canvas.addEventListener("lostpointercapture", e => this.up(e), opt);
+    document.addEventListener("touchmove", e => e.preventDefault(), opt);
+    document.addEventListener("gesturestart", e => e.preventDefault(), opt);
+    document.addEventListener("contextmenu", e => e.preventDefault());
+    const portraitCheck = () => {
+      if (window.matchMedia && matchMedia("(orientation: portrait) and (pointer: coarse)").matches) { Input.clear(); Game.pauseIfPlaying(); }
+    };
+    addEventListener("resize", portraitCheck);
+    addEventListener("orientationchange", portraitCheck);
+  },
+  pos(e) {
+    const r = this.canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * CONFIG.width / r.width, y: (e.clientY - r.top) * CONFIG.height / r.height };
+  },
+  hit(x, y) {
+    const m = 10;
+    for (const k in this.btns) {
+      const b = this.btns[k];
+      if (x >= b.x - m && x <= b.x + b.w + m && y >= b.y - m && y <= b.y + b.h + m) return k;
+    }
+    return null;
+  },
+  has(name) { for (const k in this.ptr) if (this.ptr[k] === name) return true; return false; },
+  down(e) {
+    if (e.pointerType === "mouse") return;
+    e.preventDefault();
+    this.enabled = true;
+    Sound.init(); Sound.startMusic();
+    try { this.canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    const p = this.pos(e), b = this.hit(p.x, p.y);
+    if (Game.state !== "play") {
+      this.ptr[e.pointerId] = null;
+      Game.onKey("Enter");
+      return;
+    }
+    if (b === "pause") { this.ptr[e.pointerId] = null; Game.onKey("KeyP"); return; }
+    if (b === "restart") { this.ptr[e.pointerId] = null; Game.onKey("KeyR"); return; }
+    if (this.held.includes(b)) {
+      this.ptr[e.pointerId] = b;
+      if (b === "jump") Input.jumpPressed = true;
+    } else this.ptr[e.pointerId] = null;
+  },
+  move(e) {
+    if (e.pointerType === "mouse" || !(e.pointerId in this.ptr) || Game.state !== "play") return;
+    e.preventDefault();
+    const p = this.pos(e); let b = this.hit(p.x, p.y);
+    if (!this.held.includes(b)) b = null;
+    if (b === "jump" && this.ptr[e.pointerId] !== "jump") Input.jumpPressed = true;
+    this.ptr[e.pointerId] = b;
+  },
+  up(e) { delete this.ptr[e.pointerId]; }
+};
+
+/* ================= Collision ================= */
+const Collision = {
+  EPS: 0.01,
+  overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; },
+  moveX(level, e, dx) {
+    const T = CONFIG.tileSize;
+    if (dx === 0) return false;
+    const n = Math.max(1, Math.ceil(Math.abs(dx) / CONFIG.maxSubstep)), s = dx / n;
+    for (let i = 0; i < n; i++) {
+      e.x += s;
+      const r0 = Math.floor(e.y / T), r1 = Math.floor((e.y + e.h - this.EPS) / T);
+      const c0 = Math.floor(e.x / T), c1 = Math.floor((e.x + e.w - this.EPS) / T);
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+        if (level.solid(c, r)) {
+          e.x = s > 0 ? c * T - e.w : (c + 1) * T;
+          return true;
+        }
+      }
+    }
+    return false;
+  },
+  moveY(level, e, dy) {
+    const T = CONFIG.tileSize, res = { ground: false, ceil: null };
+    if (dy === 0) return res;
+    const n = Math.max(1, Math.ceil(Math.abs(dy) / CONFIG.maxSubstep)), s = dy / n;
+    for (let i = 0; i < n; i++) {
+      e.y += s;
+      const c0 = Math.floor(e.x / T), c1 = Math.floor((e.x + e.w - this.EPS) / T);
+      const r0 = Math.floor(e.y / T), r1 = Math.floor((e.y + e.h - this.EPS) / T);
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+        if (level.solid(c, r)) {
+          if (s > 0) { e.y = r * T - e.h; res.ground = true; }
+          else {
+            e.y = (r + 1) * T;
+            let best = -1, bc = c;
+            for (let cc = c0; cc <= c1; cc++) {
+              if (!level.solid(cc, r)) continue;
+              const ov = Math.min(e.x + e.w, (cc + 1) * T) - Math.max(e.x, cc * T);
+              if (ov > best) { best = ov; bc = cc; }
+            }
+            res.ceil = { c: bc, r: r };
+          }
+          e.vy = 0;
+          return res;
+        }
+      }
+    }
+    return res;
+  }
+};
+
+/* ================= Level ================= */
+class Level {
+  constructor() {
+    const C = CONFIG, W = C.levelCols, H = C.levelRows;
+    this.cols = W; this.rows = H; this.pxW = W * C.tileSize; this.pxH = H * C.tileSize;
+    this.tiles = []; for (let r = 0; r < H; r++) this.tiles.push(new Uint8Array(W));
+    const pits = [[62, 64], [84, 86], [106, 108]];
+    for (let c = 0; c < W; c++) {
+      if (pits.some(p => c >= p[0] && c <= p[1])) continue;
+      for (let r = 14; r < H; r++) this.tiles[r][c] = 1;
+    }
+    for (let r = 0; r < 14; r++) this.tiles[r][W - 1] = 2;
+    const plat = (a, b, r) => { for (let c = a; c <= b; c++) this.tiles[r][c] = 2; };
+    const fill = (a, b, r0) => { for (let c = a; c <= b; c++) for (let r = r0; r <= 13; r++) this.tiles[r][c] = 2; };
+    [48, 50, 52].forEach(c => this.tiles[10][c] = 3);
+    plat(54, 57, 12);
+    plat(70, 74, 12);
+    plat(90, 93, 12); plat(97, 100, 12);
+    plat(112, 117, 12); plat(119, 122, 10);
+    fill(136, 139, 13); fill(140, 143, 12);
+    this.bump = null;
+    const T = C.tileSize, gy = 14 * T;
+    this.spawn = { x: 3 * T + 4, y: gy - C.playerH };
+    const eb = (c, r, minC, maxC) => ({ x: c * T, y: r * T - C.enemyH, minX: minC == null ? -1e9 : minC * T, maxX: maxC == null ? 1e9 : (maxC + 1) * T });
+    this.enemySpawns = [
+      eb(33, 14, 27, 43), eb(72, 12), eb(79, 14, 75, 83), eb(95, 14, 90, 103),
+      eb(114, 12), eb(122, 14, 118, 125), eb(132, 14, 127, 135)
+    ];
+    this.seedSpawns = [];
+    const add = (c, r) => this.seedSpawns.push({ x: c * T + T / 2, y: r * T + T / 2 });
+    for (let c = 8; c <= 12; c++) add(c, 13);
+    add(16, 12); add(17, 11); add(18, 11); add(19, 12);
+    for (let c = 38; c <= 42; c++) add(c, 13);
+    for (let c = 54; c <= 57; c++) add(c, 11);
+    add(62, 12); add(63, 11); add(64, 12);
+    for (let c = 70; c <= 74; c++) add(c, 11);
+    add(84, 12); add(85, 11); add(86, 12);
+    for (let c = 90; c <= 93; c++) add(c, 11);
+    for (let c = 97; c <= 100; c++) add(c, 11);
+    for (let c = 101; c <= 103; c++) add(c, 13);
+    add(106, 12); add(107, 11); add(108, 12);
+    for (let c = 112; c <= 117; c++) add(c, 11);
+    for (let c = 119; c <= 122; c++) add(c, 9);
+    for (let c = 128; c <= 134; c++) add(c, 13);
+    add(137, 12); add(138, 12); add(141, 11); add(142, 11);
+    this.portal = { x: 150 * T, y: gy - 64, w: 32, h: 64 };
+    this.totalSeeds = this.seedSpawns.length + 3;
+  }
+  tile(c, r) {
+    if (c < 0 || c >= this.cols) return 2;
+    if (r < 0 || r >= this.rows) return 0;
+    return this.tiles[r][c];
+  }
+  solid(c, r) { return this.tile(c, r) !== 0; }
+}
+
+/* ================= Player ================= */
+class Player {
+  constructor(sp) {
+    const C = CONFIG;
+    Object.assign(this, { x: sp.x, y: sp.y, w: C.playerW, h: C.playerH, vx: 0, vy: 0, prevX: sp.x, prevY: sp.y,
+      onGround: false, coyote: 0, jumpBuffer: 0, cut: true, face: 1, lives: C.lives, inv: 0, stun: 0, anim: 0 });
+  }
+  approach(v, t, a) { return v < t ? Math.min(v + a, t) : Math.max(v - a, t); }
+  update(dt, game) {
+    const C = CONFIG, lv = game.level;
+    this.prevX = this.x; this.prevY = this.y;
+    if (Input.jumpPressed) { this.jumpBuffer = C.jumpBufferTime; Input.jumpPressed = false; }
+    this.jumpBuffer = Math.max(0, this.jumpBuffer - dt);
+    this.coyote = this.onGround ? C.coyoteTime : Math.max(0, this.coyote - dt);
+    this.inv = Math.max(0, this.inv - dt); this.stun = Math.max(0, this.stun - dt);
+
+    const dir = this.stun > 0 ? 0 : (Input.right ? 1 : 0) - (Input.left ? 1 : 0);
+    const maxS = Input.run ? C.runMaxSpeed : C.walkMaxSpeed;
+    if (this.stun <= 0) {
+      const acc = this.onGround ? C.groundAcceleration : C.airAcceleration;
+      const dec = this.onGround ? C.groundDeceleration : C.airDeceleration;
+      if (dir === 0) this.vx = this.approach(this.vx, 0, dec * dt);
+      else {
+        this.face = dir;
+        const target = dir * maxS;
+        if (Math.sign(this.vx) === -dir) this.vx = this.approach(this.vx, target, (dec + acc) * dt);
+        else if (Math.abs(this.vx) > maxS) this.vx = this.approach(this.vx, target, dec * dt);
+        else this.vx = this.approach(this.vx, target, acc * dt);
+      }
+    }
+    if (this.jumpBuffer > 0 && this.coyote > 0) {
+      this.vy = C.jumpVelocity; this.jumpBuffer = 0; this.coyote = 0; this.onGround = false; this.cut = false;
+      Sound.play("jump");
+    }
+    if (this.vy < 0 && !Input.jumpHeld && !this.cut) { this.vy *= C.jumpCutMultiplier; this.cut = true; }
+    this.vy = Math.min(this.vy + C.gravity * dt, C.maxFallSpeed);
+
+    if (Collision.moveX(lv, this, this.vx * dt)) this.vx = 0;
+    if (this.x < 0) { this.x = 0; this.vx = 0; }
+    const r = Collision.moveY(lv, this, this.vy * dt);
+    this.onGround = r.ground;
+    if (r.ceil) game.bumpTile(r.ceil.c, r.ceil.r);
+    this.anim += Math.abs(this.vx) * dt * 0.06;
+  }
+}
+
+/* ================= Enemy ================= */
+class Enemy {
+  constructor(s) {
+    Object.assign(this, { x: s.x, y: s.y, w: CONFIG.enemyW, h: CONFIG.enemyH, minX: s.minX, maxX: s.maxX,
+      vx: 0, vy: 0, dir: -1, prevY: s.y, onGround: false, dead: false, deadT: 0, anim: Math.random() * 6 });
+  }
+  update(dt, lv) {
+    const C = CONFIG, T = C.tileSize;
+    this.prevY = this.y;
+    if (this.dead) { this.deadT += dt; return; }
+    this.anim += dt * 8;
+    if (this.x <= this.minX) this.dir = 1;
+    else if (this.x + this.w >= this.maxX) this.dir = -1;
+    if (this.onGround) {
+      const lookX = this.dir > 0 ? this.x + this.w + 1 : this.x - 1;
+      if (!lv.solid(Math.floor(lookX / T), Math.floor((this.y + this.h + 2) / T))) this.dir = -this.dir;
+    }
+    this.vy = Math.min(this.vy + C.gravity * dt, C.maxFallSpeed);
+    if (Collision.moveX(lv, this, this.dir * C.enemySpeed * dt)) this.dir = -this.dir;
+    const r = Collision.moveY(lv, this, this.vy * dt);
+    this.onGround = r.ground;
+  }
+}
+
+/* ================= Camera ================= */
+class Camera {
+  constructor() { this.x = 0; this.y = 0; }
+  target(p, lv) { return Math.max(0, Math.min(lv.pxW - CONFIG.width, p.x + p.w / 2 - CONFIG.width / 2 + p.face * 40)); }
+  snap(p, lv) { this.x = Math.round(this.target(p, lv)); }
+  follow(p, lv) {
+    const t = this.target(p, lv);
+    this.x += (t - this.x) * 0.15;
+    this.x = Math.max(0, Math.min(lv.pxW - CONFIG.width, this.x));
+  }
+}
+
+/* ================= Game ================= */
+const Game = {
+  state: "start", level: null, player: null, enemies: [], seeds: [], particles: [], popups: [],
+  camera: new Camera(), score: 0, seedCount: 0, time: 0, acc: 0, last: 0, clock: 0, loseReason: "",
+  init() {
+    this.reset(); this.state = "start";
+    requestAnimationFrame(t => { this.last = t; this.frame(t); });
+  },
+  reset() {
+    this.level = new Level();
+    this.player = new Player(this.level.spawn);
+    this.enemies = this.level.enemySpawns.map(s => new Enemy(s));
+    this.seeds = this.level.seedSpawns.map(s => ({ x: s.x, y: s.y, got: false }));
+    this.particles = []; this.popups = [];
+    this.score = 0; this.seedCount = 0; this.time = 0; this.acc = 0; this.loseReason = "";
+    Input.jumpPressed = false;
+    this.camera.snap(this.player, this.level);
+  },
+  startPlay() { this.reset(); this.state = "play"; },
+  pauseIfPlaying() { if (this.state === "play") this.state = "paused"; },
+  onKey(code) {
+    if (code === "KeyR") { this.startPlay(); return; }
+    if (code === "KeyM") { Sound.musicOn = !Sound.musicOn; return; }
+    if (code === "KeyP") {
+      if (this.state === "play") this.state = "paused";
+      else if (this.state === "paused") { this.state = "play"; this.acc = 0; Input.jumpPressed = false; }
+      return;
+    }
+    if (code === "Enter" || code === "Space") {
+      if (this.state === "start") { this.startPlay(); }
+      else if (this.state === "paused") { this.state = "play"; this.acc = 0; Input.jumpPressed = false; }
+      else if (this.state === "lose" || this.state === "win") this.startPlay();
+    }
+  },
+  bumpTile(c, r) {
+    const lv = this.level;
+    if (lv.tile(c, r) === 3) {
+      lv.tiles[r][c] = 4; lv.bump = { c, r, t: 0 };
+      this.score += CONFIG.bonusScore; this.seedCount++;
+      this.popups.push({ x: c * 32 + 16, y: r * 32 - 4, t: 0, text: "+" + CONFIG.bonusScore });
+      this.spark(c * 32 + 16, r * 32 - 4, "#ffe36e", 8);
+      Sound.play("seed");
+    } else Sound.play("bump");
+  },
+  spark(x, y, col, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 120;
+      this.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60, t: 0, life: 0.4 + Math.random() * 0.3, col });
+    }
+  },
+  hurt(e) {
+    const p = this.player;
+    p.lives--; p.inv = CONFIG.invincibleTime; p.stun = CONFIG.hurtStun;
+    p.vx = ((p.x + p.w / 2) < (e.x + e.w / 2) ? -1 : 1) * 170; p.vy = -260; p.onGround = false;
+    this.spark(p.x + p.w / 2, p.y + p.h / 2, "#ff7a6a", 8);
+    if (p.lives <= 0) { p.lives = 0; this.lose("被機械甲蟲擊倒了"); } else Sound.play("hurt");
+  },
+  lose(reason) { this.state = "lose"; this.loseReason = reason; Sound.play("lose"); },
+  update(dt) {
+    const p = this.player, lv = this.level, C = CONFIG;
+    this.time += dt;
+    p.update(dt, this);
+    for (const e of this.enemies) e.update(dt, lv);
+    this.enemies = this.enemies.filter(e => !(e.dead && e.deadT > 0.35));
+    for (const e of this.enemies) {
+      if (e.dead || !Collision.overlap(p, e)) continue;
+      const stomp = p.vy > 0 && (p.prevY + p.h) <= (e.prevY + C.stompTolerance);
+      if (stomp) {
+        e.dead = true; e.deadT = 0;
+        p.vy = Input.jumpHeld ? C.stompBounceHeld : C.stompBounce; p.cut = true; p.onGround = false;
+        this.score += C.stompScore;
+        this.popups.push({ x: e.x + e.w / 2, y: e.y, t: 0, text: "+" + C.stompScore });
+        this.spark(e.x + e.w / 2, e.y + e.h / 2, "#9fe8d8", 8);
+        Sound.play("stomp");
+      } else if (p.inv <= 0) {
+        this.hurt(e);
+        if (this.state !== "play") return;
+      }
+    }
+    const box = { x: 0, y: 0, w: 16, h: 16 };
+    for (const s of this.seeds) {
+      if (s.got) continue;
+      box.x = s.x - 8; box.y = s.y - 8;
+      if (Collision.overlap(p, box)) {
+        s.got = true; this.seedCount++; this.score += C.seedScore;
+        this.spark(s.x, s.y, "#fff2a0", 6); Sound.play("seed");
+      }
+    }
+    if (lv.bump) { lv.bump.t += dt; if (lv.bump.t > 0.2) lv.bump = null; }
+    for (const q of this.particles) { q.t += dt; q.vy += 600 * dt; q.x += q.vx * dt; q.y += q.vy * dt; }
+    this.particles = this.particles.filter(q => q.t < q.life);
+    for (const q of this.popups) q.t += dt;
+    this.popups = this.popups.filter(q => q.t < 0.8);
+    if (Collision.overlap(p, lv.portal)) { this.state = "win"; Sound.play("win"); return; }
+    if (p.y > C.fallDeathY) { p.lives = 0; this.lose("掉出了浮空溫室"); return; }
+  },
+  frame(t) {
+    const dt = Math.min((t - this.last) / 1000, 0.25); this.last = t; this.clock += dt;
+    if (this.state === "play") {
+      this.acc += dt; let n = 0;
+      while (this.acc >= CONFIG.fixedStep && n < CONFIG.maxStepsPerFrame && this.state === "play") {
+        this.update(CONFIG.fixedStep); this.acc -= CONFIG.fixedStep; n++;
+      }
+      if (n >= CONFIG.maxStepsPerFrame) this.acc = 0;
+      this.camera.follow(this.player, this.level);
+    }
+    Renderer.draw(this);
+    requestAnimationFrame(tt => this.frame(tt));
+  }
+};
+
+/* ================= Renderer ================= */
+const Renderer = {
+  canvas: null, ctx: null,
+  init() {
+    this.canvas = document.getElementById("c"); this.ctx = this.canvas.getContext("2d");
+    this.ctx.imageSmoothingEnabled = false;
+    const fit = () => {
+      const s = Math.min(innerWidth / CONFIG.width, innerHeight / CONFIG.height);
+      this.canvas.style.width = Math.floor(CONFIG.width * s) + "px";
+      this.canvas.style.height = Math.floor(CONFIG.height * s) + "px";
+    };
+    addEventListener("resize", fit); addEventListener("orientationchange", () => setTimeout(fit, 200)); fit();
+  },
+  R(x, y, w, h, c) { this.ctx.fillStyle = c; this.ctx.fillRect(Math.round(x), Math.round(y), w, h); },
+  background(cx, clock) {
+    const ctx = this.ctx, W = CONFIG.width, H = CONFIG.height;
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#9fe0dc"); g.addColorStop(0.6, "#cdeedd"); g.addColorStop(1, "#eaf6d8");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < 6; i++) {
+      const x = ((i * 260 - cx * 0.1 + clock * 6) % (W + 300) + W + 300) % (W + 300) - 150;
+      this.R(x, 60 + (i % 3) * 40, 120, 14, "rgba(255,255,255,0.7)");
+      this.R(x + 20, 48 + (i % 3) * 40, 70, 14, "rgba(255,255,255,0.7)");
+    }
+    const off = -(cx * 0.3) % 160;
+    for (let x = off - 160; x < W + 160; x += 160) {
+      this.R(x, 0, 6, 400, "rgba(70,130,130,0.35)");
+      this.R(x + 80, 0, 3, 400, "rgba(70,130,130,0.2)");
+    }
+    this.R(0, 120, W, 4, "rgba(70,130,130,0.3)");
+    this.R(0, 260, W, 4, "rgba(70,130,130,0.25)");
+    const off2 = -(cx * 0.5) % 240;
+    for (let x = off2 - 240; x < W + 240; x += 240) {
+      this.R(x + 100, 330, 8, 120, "#5aa88a");
+      this.R(x + 80, 320, 48, 14, "#6cc29c"); this.R(x + 92, 304, 24, 16, "#7bd3aa");
+      this.R(x + 40, 380, 30, 10, "#5aa88a");
+    }
+    const off3 = -(cx * 0.7) % 200;
+    for (let x = off3 - 200; x < W + 200; x += 200) {
+      const len = 50 + ((x / 200 | 0) & 3) * 18;
+      this.R(x + 40, 0, 4, len, "#3f8f6b"); this.R(x + 32, len, 8, 8, "#58b383"); this.R(x + 44, len - 12, 8, 8, "#58b383");
+    }
+  },
+  tiles(game) {
+    const lv = game.level, cx = Math.round(game.camera.x), T = 32;
+    const c0 = Math.max(0, Math.floor(cx / T)), c1 = Math.min(lv.cols - 1, Math.floor((cx + CONFIG.width) / T));
+    for (let r = 0; r < lv.rows; r++) for (let c = c0; c <= c1; c++) {
+      const t = lv.tiles[r][c]; if (!t) continue;
+      let x = c * T - cx, y = r * T;
+      if (lv.bump && lv.bump.c === c && lv.bump.r === r) y -= Math.sin(lv.bump.t / 0.2 * Math.PI) * 8;
+      this.tile(t, x, y, lv.tile(c, r - 1) === 0, c, r);
+    }
+  },
+  tile(t, x, y, top, c, r) {
+    const R = this.R.bind(this);
+    if (t === 1) {
+      R(x, y, 32, 32, "#6b4a33"); R(x + 4, y + 12, 4, 4, "#8a6446"); R(x + 20, y + 20, 6, 4, "#8a6446"); R(x + 12, y + 26, 4, 4, "#54382a");
+      if (top) { R(x, y, 32, 8, "#4fae5a"); R(x, y + 8, 32, 2, "#357a40"); R(x + 4, y - 2, 4, 2, "#6ed17a"); R(x + 18, y - 2, 4, 2, "#6ed17a"); }
+    } else if (t === 2) {
+      R(x, y, 32, 32, "#5f8f93"); R(x + 2, y + 2, 28, 28, "#8fc3c4"); R(x + 4, y + 4, 10, 10, "#b9e4e0"); R(x + 18, y + 18, 10, 10, "#a3d4d1");
+      R(x, y, 32, 2, "#3e6a6e"); R(x, y + 30, 32, 2, "#3e6a6e"); R(x, y, 2, 32, "#3e6a6e"); R(x + 30, y, 2, 32, "#3e6a6e");
+      R(x + 15, y + 2, 2, 28, "#3e6a6e");
+    } else if (t === 3) {
+      R(x, y, 32, 32, "#8a5a10"); R(x + 2, y + 2, 28, 28, "#f2bf3a"); R(x + 4, y + 4, 24, 4, "#ffe27a");
+      R(x + 12, y + 8, 8, 4, "#8a5a10"); R(x + 16, y + 12, 4, 4, "#8a5a10"); R(x + 12, y + 16, 6, 4, "#8a5a10"); R(x + 12, y + 22, 4, 4, "#8a5a10");
+      R(x + 4, y + 4, 2, 2, "#8a5a10"); R(x + 26, y + 4, 2, 2, "#8a5a10"); R(x + 4, y + 26, 2, 2, "#8a5a10"); R(x + 26, y + 26, 2, 2, "#8a5a10");
+    } else if (t === 4) {
+      R(x, y, 32, 32, "#4a4440"); R(x + 2, y + 2, 28, 28, "#7a726a"); R(x + 4, y + 4, 24, 24, "#6a625b"); R(x + 8, y + 14, 16, 4, "#4a4440");
+    }
+  },
+  portal(game) {
+    const p = game.level.portal, cx = Math.round(game.camera.x), t = game.clock;
+    const x = p.x - cx, y = p.y;
+    this.R(x - 6, y + 56, 44, 8, "#3e6a6e");
+    for (let i = 0; i < 4; i++) {
+      const w = 28 - i * 6, h = 60 - i * 10;
+      const col = ["#6a3fd8", "#8f6af0", "#b79cff", "#e6dcff"][i];
+      this.R(x + 16 - w / 2, y + 2 + i * 5, w, h, col);
+    }
+    for (let i = 0; i < 6; i++) {
+      const a = t * 3 + i, px = x + 16 + Math.cos(a) * 22, py = y + 32 + Math.sin(a * 1.3) * 28;
+      this.R(px, py, 3, 3, "#fff6b0");
+    }
+  },
+  seeds(game) {
+    const cx = Math.round(game.camera.x);
+    for (const s of game.seeds) {
+      if (s.got) continue;
+      const x = s.x - cx; if (x < -20 || x > CONFIG.width + 20) continue;
+      const y = s.y + Math.sin(game.clock * 4 + s.x * 0.05) * 3;
+      this.R(x - 2, y - 8, 4, 16, "#ffd23f"); this.R(x - 6, y - 4, 12, 8, "#ffd23f");
+      this.R(x - 4, y - 6, 8, 12, "#ffe98a"); this.R(x - 1, y - 3, 3, 3, "#fff9d0");
+      this.R(x - 1, y - 12, 2, 4, "#4fae5a");
+    }
+  },
+  enemy(e, cx, clock) {
+    const ctx = this.ctx, x = e.x - cx;
+    if (x < -40 || x > CONFIG.width + 40) return;
+    ctx.save();
+    ctx.translate(Math.round(x + (e.dir > 0 ? 0 : e.w)), Math.round(e.y + e.h));
+    ctx.scale(e.dir > 0 ? 1 : -1, e.dead ? 0.35 : 1);
+    ctx.translate(0, -e.h);
+    const R = (a, b, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(a, b, w, h); };
+    const f = Math.floor(e.anim) % 2;
+    R(4 + f, 16, 3, 4, "#2a3b42"); R(11 - f, 16, 3, 4, "#2a3b42"); R(18 + f, 16, 3, 4, "#2a3b42");
+    R(2, 4, 22, 12, "#2f7f86"); R(4, 2, 18, 3, "#2f7f86"); R(12, 3, 2, 13, "#1d4f55");
+    R(5, 6, 6, 3, "#6fd0d0"); R(16, 6, 4, 2, "#4aa9ad");
+    R(20, 8, 6, 8, "#24464c"); R(23, 10, 2, 2, "#ff5a4a"); R(24, 5, 2, 4, "#24464c");
+    R(0, 10, 3, 4, "#d6a638");
+    ctx.restore();
+  },
+  player(p, cx, clock) {
+    if (p.inv > 0 && Math.floor(p.inv * 14) % 2 === 0) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(Math.round(p.x - cx + (p.face > 0 ? 0 : p.w)), Math.round(p.y));
+    ctx.scale(p.face > 0 ? 1 : -1, 1);
+    const R = (a, b, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(a, b, w, h); };
+    const f = p.onGround && Math.abs(p.vx) > 20 ? Math.floor(p.anim) % 2 : 0;
+    const air = !p.onGround;
+    const sw = (x, ff) => x + (air ? 0 : ff * 2);
+    R(sw(4, f), 26, 7, 4, "#5a3a22"); R(sw(13, -f), 26 - (air ? 2 : 0), 7, 4, "#5a3a22");
+    R(5, 14, 14, 12, "#3c9a55"); R(5, 21, 14, 2, "#c9a05a"); R(3, 15, 3, 8, "#2f7a45"); R(18, 15, 3, 8, "#2f7a45");
+    R(15, 17, 4, 4, "#e6c46a");
+    R(6, 5, 12, 9, "#f0c9a0");
+    R(4, 4, 16, 3, "#c9a05a"); R(7, 0, 10, 4, "#d8b36a");
+    R(6, 7, 13, 2, "#2c2c34"); R(11, 6, 5, 5, "#5ee0f0"); R(6, 6, 5, 5, "#5ee0f0"); R(12, 7, 2, 2, "#ffffff"); R(7, 7, 2, 2, "#ffffff");
+    R(11, -4, 2, 4, "#4fae5a"); R(13, -6, 5, 3, "#7bd98a"); R(7, -4, 4, 3, "#7bd98a");
+    ctx.restore();
+  },
+  text(s, x, y, size, col, align) {
+    const ctx = this.ctx;
+    ctx.font = "bold " + size + "px 'Microsoft JhengHei','PingFang TC','Noto Sans TC',sans-serif";
+    ctx.textAlign = align || "left"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(10,30,35,0.85)"; ctx.fillText(s, x + 2, y + 2);
+    ctx.fillStyle = col || "#fff"; ctx.fillText(s, x, y);
+  },
+  heart(x, y, full) {
+    const c = full ? "#ff5a6e" : "#4a3a40", R = this.R.bind(this);
+    R(x + 3, y, 6, 3, c); R(x + 12, y, 6, 3, c); R(x, y + 3, 21, 6, c); R(x + 3, y + 9, 15, 3, c); R(x + 6, y + 12, 9, 3, c); R(x + 9, y + 15, 3, 3, c);
+    if (full) R(x + 3, y + 3, 3, 3, "#ffb0b8");
+  },
+  panel(w, h) {
+    const x = (CONFIG.width - w) / 2, y = (CONFIG.height - h) / 2;
+    this.R(0, 0, CONFIG.width, CONFIG.height, "rgba(8,24,28,0.6)");
+    this.R(x - 4, y - 4, w + 8, h + 8, "#2c5a5c"); this.R(x, y, w, h, "#14343a"); this.R(x + 6, y + 6, w - 12, 4, "#4aa9ad");
+    return y;
+  },
+  hud(game) {
+    const p = game.player;
+    this.R(0, 0, CONFIG.width, 40, "rgba(10,40,45,0.55)");
+    for (let i = 0; i < CONFIG.lives; i++) this.heart(14 + i * 28, 11, i < p.lives);
+    this.text("分數 " + String(game.score).padStart(5, "0"), 100, 20, 20, "#fff");
+    this.text("種子 " + game.seedCount + "/" + game.level.totalSeeds, 300, 20, 20, "#ffe36e");
+    this.text("時間 " + game.time.toFixed(1) + " 秒", 500, 20, 20, "#cfeff0");
+    if (!Touch.enabled) this.text("P 暫停　R 重新開始　M 音樂" + (Sound.musicOn ? "開" : "關"), 946, 20, 14, "#cfeff0", "right");
+  },
+  touchControls() {
+    const ctx = this.ctx;
+    for (const k in Touch.btns) {
+      const b = Touch.btns[k], on = Touch.has(k), small = (k === "pause" || k === "restart");
+      ctx.globalAlpha = on ? 0.75 : (small ? 0.5 : 0.4);
+      this.R(b.x, b.y, b.w, b.h, on ? "#ffe36e" : "#0d2a30");
+      this.R(b.x + 4, b.y + 4, b.w - 8, b.h - 8, on ? "#fff3b0" : "#2c6a70");
+      ctx.globalAlpha = 0.95;
+      this.text(b.label, b.x + b.w / 2, b.y + b.h / 2, small ? 22 : 34, "#ffffff", "center");
+    }
+    ctx.globalAlpha = 1;
+  },
+  draw(game) {
+    const cx = Math.round(game.camera.x);
+    this.background(cx, game.clock);
+    this.tiles(game);
+    this.portal(game);
+    this.seeds(game);
+    for (const e of game.enemies) this.enemy(e, cx, game.clock);
+    this.player(game.player, cx, game.clock);
+    for (const q of game.particles) this.R(q.x - cx, q.y, 4, 4, q.col);
+    for (const q of game.popups) this.text(q.text, q.x - cx, q.y - q.t * 40, 16, "#fff7b0", "center");
+    this.hud(game);
+    if (Touch.enabled && game.state === "play") this.touchControls();
+    UI.draw(this, game);
+  }
+};
+
+/* ================= UI ================= */
+const UI = {
+  draw(r, game) {
+    const W = CONFIG.width, mid = W / 2, t = Touch.enabled;
+    if (game.state === "start") {
+      let y = r.panel(640, 400);
+      r.text("星芽快跑", mid, y + 60, 56, "#9bf0a8", "center");
+      r.text("戴護目鏡的植物探險家，穿越浮空溫室，抵達傳送門！", mid, y + 112, 18, "#cfeff0", "center");
+      const L = t
+        ? ["左下 ◀ ▶　移動", "右下「跳」　跳躍（放開可短跳）", "按住「跑」　奔跑", "右上 Ⅱ 暫停　↻ 重新開始", "踩敵人頭頂擊敗；碰到側面會受傷（2 點生命）", "從下方頂擊黃色方塊、收集能量種子"]
+        : ["A / D 或 ← →　移動", "Space 或 Z　跳躍（放開可短跳）", "Shift　奔跑", "P　暫停／繼續　　R　重新開始", "踩敵人頭頂擊敗；碰到側面會受傷（2 點生命）", "從下方頂擊黃色方塊、收集能量種子"];
+      L.forEach((s, i) => r.text(s, mid, y + 160 + i * 28, 18, "#fff", "center"));
+      if (Math.floor(game.clock * 2) % 2 === 0) r.text("按 Enter / Space 開始　（觸控：點擊畫面）", mid, y + 360, 22, "#ffe36e", "center");
+    } else if (game.state === "paused") {
+      let y = r.panel(460, 180);
+      r.text("暫停中", mid, y + 60, 40, "#ffe36e", "center");
+      r.text(t ? "點擊畫面繼續" : "按 P 或 Space 繼續　／　R 重新開始", mid, y + 120, 20, "#fff", "center");
+    } else if (game.state === "lose") {
+      let y = r.panel(520, 270);
+      r.text("挑戰失敗", mid, y + 54, 44, "#ff7a6a", "center");
+      r.text(game.loseReason, mid, y + 104, 20, "#cfeff0", "center");
+      r.text("分數 " + game.score + "　種子 " + game.seedCount + "/" + game.level.totalSeeds, mid, y + 150, 22, "#fff", "center");
+      r.text(t ? "點擊畫面重新開始" : "按 R 或 Enter 重新開始", mid, y + 210, 22, "#ffe36e", "center");
+    } else if (game.state === "win") {
+      let y = r.panel(540, 310);
+      r.text("通關成功！", mid, y + 54, 46, "#9bf0a8", "center");
+      r.text("你抵達了傳送門", mid, y + 100, 20, "#cfeff0", "center");
+      r.text("分數 " + game.score, mid, y + 146, 24, "#fff", "center");
+      r.text("種子 " + game.seedCount + "/" + game.level.totalSeeds + "　剩餘生命 " + game.player.lives, mid, y + 180, 20, "#ffe36e", "center");
+      r.text("時間 " + game.time.toFixed(1) + " 秒", mid, y + 212, 20, "#cfeff0", "center");
+      r.text(t ? "點擊畫面再玩一次" : "按 R 或 Enter 再玩一次", mid, y + 262, 22, "#ffe36e", "center");
+    }
+  }
+};
+
+/* ================= Boot ================= */
+Renderer.init();
+Input.init();
+Touch.init(document.getElementById("c"));
+Game.init();
+document.getElementById("c").focus();
+</script>
+</body>
+</html>
