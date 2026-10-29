@@ -24,20 +24,33 @@
 /* ================= CONFIG ================= */
 const CONFIG = {
   width: 960, height: 540, tileSize: 32,
-  levelCols: 160, levelRows: 17,
+  levelCols: 200, levelRows: 17,
   fixedStep: 1 / 60, maxStepsPerFrame: 5,
-  walkMaxSpeed: 180, runMaxSpeed: 270,
   groundAcceleration: 1400, groundDeceleration: 1800,
   airAcceleration: 1000, airDeceleration: 500,
-  gravity: 1500, jumpVelocity: -520, maxFallSpeed: 700,
+  gravity: 1500, maxFallSpeed: 700,
   jumpCutMultiplier: 0.5, coyoteTime: 0.08, jumpBufferTime: 0.10,
   playerW: 24, playerH: 30,
-  lives: 2, invincibleTime: 1.6, hurtStun: 0.18,
+  maxLives: 4, invincibleTime: 1.6, hurtStun: 0.18,
   stompBounce: -320, stompBounceHeld: -430, stompTolerance: 8,
-  enemyW: 26, enemyH: 20, enemySpeed: 55,
-  maxSubstep: 8, seedScore: 100, bonusScore: 200, stompScore: 200,
+  maxSubstep: 8, seedScore: 100, bonusScore: 200, stompScore: 200, killScore: 250, dashKillScore: 300,
+  dashSpeed: 540, dashTime: 0.17, dashCooldown: 0.7,
+  fireDuration: 14, boomDuration: 16, starDuration: 8,
+  fireSpeed: 420, fireCooldown: 0.32, boomSpeed: 440, boomOutTime: 0.42, boomReturnSpeed: 520, boomCooldown: 0.4,
+  buffSpawnMin: 7, buffSpawnMax: 11, buffMaxActive: 4, buffLife: 30, buffInitial: 4,
+  crumbleDelay: 0.7, crumbleRespawn: 3.5,
   fallDeathY: 17 * 32 + 80
 };
+
+const CHARACTERS = [
+  { id: "explorer", name: "植物探險家", lives: 3, walk: 180, run: 270, jump: -520, dash: false,
+    desc: ["耐打：初始生命 3", "移動與跳躍均衡", "善用 buff 突破難關"] },
+  { id: "assassin", name: "刺客", lives: 2, walk: 205, run: 305, jump: -540, dash: true,
+    desc: ["速度快、跳得高", "C 鍵／「衝」：閃身突進", "衝刺無敵並斬殺敵人（生命 2）"] }
+];
+
+const ENEMY_DIM = { walker: [26, 20], spiky: [28, 20], hopper: [24, 22], flyer: [26, 18] };
+const BUFF_NAMES = { fire: "噴火", boom: "迴力刀", star: "無敵", heal: "回復" };
 
 /* ================= Audio (原創簡易音效與旋律) ================= */
 const Sound = {
@@ -67,6 +80,10 @@ const Sound = {
       case "hurt": this.tone(260, 0.3, "sawtooth", 0.05, 70); break;
       case "lose": this.tone(300, 0.6, "sawtooth", 0.05, 60); break;
       case "win": [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => this.tone(f, 0.18, "triangle", 0.07), i * 110)); break;
+      case "fire": this.tone(600, 0.12, "sawtooth", 0.04, 200); break;
+      case "boom": this.tone(500, 0.15, "triangle", 0.05, 800); break;
+      case "dash": this.tone(900, 0.14, "sawtooth", 0.04, 200); break;
+      case "buff": [660, 880, 1100].forEach((f, i) => setTimeout(() => this.tone(f, 0.1, "square", 0.04), i * 70)); break;
     }
   },
   startMusic() {
@@ -84,7 +101,7 @@ const Sound = {
 
 /* ================= Input ================= */
 const Input = {
-  down: {}, jumpPressed: false,
+  down: {}, jumpPressed: false, attackPressed: false, dashPressed: false,
   init() {
     const block = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"];
     window.addEventListener("keydown", e => {
@@ -92,7 +109,11 @@ const Input = {
       Sound.init(); Sound.startMusic();
       if (e.repeat) return;
       this.down[e.code] = true;
-      if (e.code === "Space" || e.code === "KeyZ") { if (Game.state === "play") this.jumpPressed = true; }
+      if (Game.state === "play") {
+        if (e.code === "Space" || e.code === "KeyZ") this.jumpPressed = true;
+        if (e.code === "KeyX" || e.code === "KeyJ") this.attackPressed = true;
+        if (e.code === "KeyC" || e.code === "KeyK") this.dashPressed = true;
+      }
       Game.onKey(e.code);
     }, { passive: false });
     window.addEventListener("keyup", e => {
@@ -102,7 +123,7 @@ const Input = {
     window.addEventListener("blur", () => { this.clear(); Game.pauseIfPlaying(); });
     document.addEventListener("visibilitychange", () => { if (document.hidden) { this.clear(); Game.pauseIfPlaying(); } });
   },
-  clear() { this.down = {}; this.jumpPressed = false; Touch.ptr = {}; },
+  clear() { this.down = {}; this.jumpPressed = false; this.attackPressed = false; this.dashPressed = false; Touch.ptr = {}; },
   get left() { return !!(this.down.ArrowLeft || this.down.KeyA || Touch.has("left")); },
   get right() { return !!(this.down.ArrowRight || this.down.KeyD || Touch.has("right")); },
   get run() { return !!(this.down.ShiftLeft || this.down.ShiftRight || Touch.has("run")); },
@@ -118,6 +139,8 @@ const Touch = {
     right:   { x: 144, y: 408, w: 104, h: 104, label: "▶" },
     run:     { x: 684, y: 432, w: 100, h: 84,  label: "跑" },
     jump:    { x: 804, y: 388, w: 134, h: 128, label: "跳" },
+    attack:  { x: 808, y: 298, w: 126, h: 74,  label: "攻" },
+    dash:    { x: 684, y: 336, w: 100, h: 80,  label: "衝" },
     pause:   { x: 900, y: 48,  w: 48,  h: 48,  label: "Ⅱ" },
     restart: { x: 846, y: 48,  w: 48,  h: 48,  label: "↻" }
   },
@@ -138,13 +161,15 @@ const Touch = {
     addEventListener("resize", portraitCheck);
     addEventListener("orientationchange", portraitCheck);
   },
+  visible(k) { return k !== "dash" || Game.character.dash; },
   pos(e) {
     const r = this.canvas.getBoundingClientRect();
     return { x: (e.clientX - r.left) * CONFIG.width / r.width, y: (e.clientY - r.top) * CONFIG.height / r.height };
   },
   hit(x, y) {
-    const m = 10;
+    const m = 6;
     for (const k in this.btns) {
+      if (!this.visible(k)) continue;
       const b = this.btns[k];
       if (x >= b.x - m && x <= b.x + b.w + m && y >= b.y - m && y <= b.y + b.h + m) return k;
     }
@@ -157,14 +182,26 @@ const Touch = {
     this.enabled = true;
     Sound.init(); Sound.startMusic();
     try { this.canvas.setPointerCapture(e.pointerId); } catch (err) {}
-    const p = this.pos(e), b = this.hit(p.x, p.y);
-    if (Game.state !== "play") {
+    const p = this.pos(e), st = Game.state;
+    if (st === "start") {
       this.ptr[e.pointerId] = null;
-      Game.onKey("Enter");
+      if (p.y >= 130 && p.y <= 350) {
+        if (p.x >= 170 && p.x <= 470) Game.selected = 0;
+        else if (p.x >= 490 && p.x <= 790) Game.selected = 1;
+      } else if (p.x >= 340 && p.x <= 620 && p.y >= 362 && p.y <= 438) Game.startPlay();
       return;
     }
+    if (st === "lose" || st === "win") {
+      this.ptr[e.pointerId] = null;
+      if (p.y >= 390 && p.y <= 432 && Math.abs(p.x - 480) < 150) Game.toTitle(); else Game.startPlay();
+      return;
+    }
+    if (st !== "play") { this.ptr[e.pointerId] = null; Game.onKey("Enter"); return; }
+    const b = this.hit(p.x, p.y);
     if (b === "pause") { this.ptr[e.pointerId] = null; Game.onKey("KeyP"); return; }
     if (b === "restart") { this.ptr[e.pointerId] = null; Game.onKey("KeyR"); return; }
+    if (b === "attack") { this.ptr[e.pointerId] = null; Input.attackPressed = true; return; }
+    if (b === "dash") { this.ptr[e.pointerId] = null; Input.dashPressed = true; return; }
     if (this.held.includes(b)) {
       this.ptr[e.pointerId] = b;
       if (b === "jump") Input.jumpPressed = true;
@@ -233,67 +270,80 @@ const Collision = {
 };
 
 /* ================= Level ================= */
+// 磁磚：0空 1地面 2平台 3獎勵方塊 4已用方塊 5尖刺(不可站立) 6崩塌平台
 class Level {
   constructor() {
-    const C = CONFIG, W = C.levelCols, H = C.levelRows;
-    this.cols = W; this.rows = H; this.pxW = W * C.tileSize; this.pxH = H * C.tileSize;
+    const C = CONFIG, W = C.levelCols, H = C.levelRows, T = C.tileSize;
+    this.cols = W; this.rows = H; this.pxW = W * T; this.pxH = H * T;
     this.tiles = []; for (let r = 0; r < H; r++) this.tiles.push(new Uint8Array(W));
-    const pits = [[62, 64], [84, 86], [106, 108]];
-    for (let c = 0; c < W; c++) {
-      if (pits.some(p => c >= p[0] && c <= p[1])) continue;
-      for (let r = 14; r < H; r++) this.tiles[r][c] = 1;
-    }
-    for (let r = 0; r < 14; r++) this.tiles[r][W - 1] = 2;
-    const plat = (a, b, r) => { for (let c = a; c <= b; c++) this.tiles[r][c] = 2; };
-    const fill = (a, b, r0) => { for (let c = a; c <= b; c++) for (let r = r0; r <= 13; r++) this.tiles[r][c] = 2; };
-    [48, 50, 52].forEach(c => this.tiles[10][c] = 3);
-    plat(54, 57, 12);
-    plat(70, 74, 12);
-    plat(90, 93, 12); plat(97, 100, 12);
-    plat(112, 117, 12); plat(119, 122, 10);
-    fill(136, 139, 13); fill(140, 143, 12);
+    this.crumble = {};
+    const segs = [
+      [0, 62, 14], [66, 71, 14], [72, 73, 13], [74, 75, 12], [76, 77, 13], [78, 80, 14],
+      [84, 92, 14], [98, 112, 14],
+      [117, 119, 14], [120, 121, 13], [122, 123, 12], [124, 125, 11], [126, 127, 12], [128, 129, 13], [130, 131, 14],
+      [135, 150, 14], [155, 172, 14], [173, 174, 13], [175, 176, 12], [177, 199, 12]
+    ];
+    for (const s of segs) for (let c = s[0]; c <= s[1]; c++) for (let r = s[2]; r < H; r++) this.tiles[r][c] = 1;
+    for (let r = 0; r < 12; r++) this.tiles[r][W - 1] = 2;
+    const put = (a, b, r, t) => { for (let c = a; c <= b; c++) this.tiles[r][c] = t; };
+    put(93, 97, 14, 6); put(152, 153, 14, 6);
+    put(114, 115, 13, 2);
+    put(55, 58, 12, 2); put(99, 101, 12, 2); put(163, 166, 12, 2);
+    put(138, 147, 10, 2);
+    this.bonusCount = 0;
+    [49, 51, 53, 87, 89].forEach(c => { this.tiles[10][c] = 3; this.bonusCount++; });
+    [41, 42, 103, 104, 160, 161, 169, 170].forEach(c => { this.tiles[13][c] = 5; });
     this.bump = null;
-    const T = C.tileSize, gy = 14 * T;
+
+    const gy = 14 * T;
     this.spawn = { x: 3 * T + 4, y: gy - C.playerH };
-    const eb = (c, r, minC, maxC) => ({ x: c * T, y: r * T - C.enemyH, minX: minC == null ? -1e9 : minC * T, maxX: maxC == null ? 1e9 : (maxC + 1) * T });
+    const eb = (kind, c, sr, minC, maxC) => ({ kind, x: c * T, y: sr * T - ENEMY_DIM[kind][1], minX: minC * T, maxX: (maxC + 1) * T });
+    const fl = (c, baseY, minC, maxC) => ({ kind: "flyer", x: c * T, y: baseY - 9, baseY, minX: minC * T, maxX: (maxC + 1) * T });
     this.enemySpawns = [
-      eb(33, 14, 27, 43), eb(72, 12), eb(79, 14, 75, 83), eb(95, 14, 90, 103),
-      eb(114, 12), eb(122, 14, 118, 125), eb(132, 14, 127, 135)
+      eb("walker", 34, 14, 28, 38), fl(57, 316, 55, 60),
+      eb("walker", 74, 12, 74, 75), eb("hopper", 79, 14, 78, 80), eb("spiky", 89, 14, 88, 91),
+      fl(104, 340, 99, 111), eb("walker", 107, 14, 105, 110),
+      eb("walker", 124, 11, 124, 125), fl(124, 282, 118, 131),
+      eb("hopper", 140, 14, 137, 148), eb("walker", 144, 14, 137, 148),
+      eb("walker", 165, 14, 163, 167), fl(164, 310, 156, 172),
+      eb("hopper", 180, 12, 177, 184)
     ];
     this.seedSpawns = [];
     const add = (c, r) => this.seedSpawns.push({ x: c * T + T / 2, y: r * T + T / 2 });
-    for (let c = 8; c <= 12; c++) add(c, 13);
-    add(16, 12); add(17, 11); add(18, 11); add(19, 12);
-    for (let c = 38; c <= 42; c++) add(c, 13);
-    for (let c = 54; c <= 57; c++) add(c, 11);
-    add(62, 12); add(63, 11); add(64, 12);
-    for (let c = 70; c <= 74; c++) add(c, 11);
-    add(84, 12); add(85, 11); add(86, 12);
-    for (let c = 90; c <= 93; c++) add(c, 11);
-    for (let c = 97; c <= 100; c++) add(c, 11);
-    for (let c = 101; c <= 103; c++) add(c, 13);
-    add(106, 12); add(107, 11); add(108, 12);
-    for (let c = 112; c <= 117; c++) add(c, 11);
-    for (let c = 119; c <= 122; c++) add(c, 9);
-    for (let c = 128; c <= 134; c++) add(c, 13);
-    add(137, 12); add(138, 12); add(141, 11); add(142, 11);
-    this.portal = { x: 150 * T, y: gy - 64, w: 32, h: 64 };
-    this.totalSeeds = this.seedSpawns.length + 3;
+    const line = (a, b, r) => { for (let c = a; c <= b; c++) add(c, r); };
+    line(8, 12, 13); [[16, 12], [17, 11], [18, 11], [19, 12], [41, 12], [42, 12]].forEach(p => add(p[0], p[1]));
+    line(36, 38, 13); line(47, 48, 13); line(55, 58, 11);
+    [[63, 12], [64, 11], [65, 12], [72, 12], [73, 12], [74, 11], [75, 11], [76, 12], [77, 12], [81, 12], [82, 11], [83, 12]].forEach(p => add(p[0], p[1]));
+    line(85, 86, 13); line(93, 97, 13); line(99, 101, 11); line(106, 110, 13);
+    [[114, 12], [115, 12], [121, 12], [123, 11], [124, 10], [125, 10], [127, 11], [129, 12], [132, 12], [133, 11], [134, 12]].forEach(p => add(p[0], p[1]));
+    line(139, 146, 13);
+    [[152, 13], [153, 13], [160, 12], [161, 12]].forEach(p => add(p[0], p[1]));
+    line(163, 166, 11);
+    [[169, 12], [170, 12], [173, 12], [174, 12], [175, 11], [176, 11]].forEach(p => add(p[0], p[1]));
+    line(179, 184, 11); add(188, 11);
+    this.buffSpots = [[12, 14], [22, 14], [37, 14], [45, 14], [51, 14], [57, 12], [61, 14], [68, 14], [74, 12], [79, 14], [86, 14],
+      [100, 12], [108, 14], [111, 14], [115, 13], [119, 14], [125, 11], [130, 14], [136, 14], [141, 14], [149, 14],
+      [158, 14], [165, 12], [172, 14], [180, 12]].map(p => ({ x: p[0] * T + 5, y: p[1] * T - 30 }));
+    this.portal = { x: 186 * T, y: 12 * T - 64, w: 32, h: 64 };
+    this.totalSeeds = this.seedSpawns.length + this.bonusCount;
   }
   tile(c, r) {
     if (c < 0 || c >= this.cols) return 2;
     if (r < 0 || r >= this.rows) return 0;
     return this.tiles[r][c];
   }
-  solid(c, r) { return this.tile(c, r) !== 0; }
+  solid(c, r) { const t = this.tile(c, r); return t !== 0 && t !== 5; }
 }
 
 /* ================= Player ================= */
 class Player {
-  constructor(sp) {
+  constructor(sp, ch) {
     const C = CONFIG;
     Object.assign(this, { x: sp.x, y: sp.y, w: C.playerW, h: C.playerH, vx: 0, vy: 0, prevX: sp.x, prevY: sp.y,
-      onGround: false, coyote: 0, jumpBuffer: 0, cut: true, face: 1, lives: C.lives, inv: 0, stun: 0, anim: 0 });
+      onGround: false, coyote: 0, jumpBuffer: 0, cut: true, face: 1, lives: ch.lives, inv: 0, stun: 0, anim: 0,
+      kind: ch.id, walk: ch.walk, run: ch.run, jumpV: ch.jump, hasDash: ch.dash,
+      dashT: 0, dashCd: 0, airDash: false, dashing: false, grace: 0, atkCd: 0, alt: false,
+      buffs: { fire: 0, boom: 0, star: 0 }, trail: [] });
   }
   approach(v, t, a) { return v < t ? Math.min(v + a, t) : Math.max(v - a, t); }
   update(dt, game) {
@@ -303,56 +353,90 @@ class Player {
     this.jumpBuffer = Math.max(0, this.jumpBuffer - dt);
     this.coyote = this.onGround ? C.coyoteTime : Math.max(0, this.coyote - dt);
     this.inv = Math.max(0, this.inv - dt); this.stun = Math.max(0, this.stun - dt);
+    this.grace = Math.max(0, this.grace - dt);
+    this.atkCd = Math.max(0, this.atkCd - dt); this.dashCd = Math.max(0, this.dashCd - dt);
+    for (const k in this.buffs) this.buffs[k] = Math.max(0, this.buffs[k] - dt);
 
-    const dir = this.stun > 0 ? 0 : (Input.right ? 1 : 0) - (Input.left ? 1 : 0);
-    const maxS = Input.run ? C.runMaxSpeed : C.walkMaxSpeed;
-    if (this.stun <= 0) {
-      const acc = this.onGround ? C.groundAcceleration : C.airAcceleration;
-      const dec = this.onGround ? C.groundDeceleration : C.airDeceleration;
-      if (dir === 0) this.vx = this.approach(this.vx, 0, dec * dt);
-      else {
-        this.face = dir;
-        const target = dir * maxS;
-        if (Math.sign(this.vx) === -dir) this.vx = this.approach(this.vx, target, (dec + acc) * dt);
-        else if (Math.abs(this.vx) > maxS) this.vx = this.approach(this.vx, target, dec * dt);
-        else this.vx = this.approach(this.vx, target, acc * dt);
+    if (Input.dashPressed) {
+      Input.dashPressed = false;
+      if (this.hasDash && this.dashCd <= 0 && this.dashT <= 0 && this.stun <= 0 && (this.onGround || !this.airDash)) {
+        this.dashT = C.dashTime; this.dashCd = C.dashCooldown;
+        if (!this.onGround) this.airDash = true;
+        Sound.play("dash"); game.spark(this.x + this.w / 2, this.y + this.h / 2, "#8a8fd8", 6);
       }
     }
-    if (this.jumpBuffer > 0 && this.coyote > 0) {
-      this.vy = C.jumpVelocity; this.jumpBuffer = 0; this.coyote = 0; this.onGround = false; this.cut = false;
-      Sound.play("jump");
+    const dashing = this.dashT > 0;
+    this.dashing = dashing;
+    if (dashing) {
+      this.dashT -= dt; this.vx = this.face * C.dashSpeed; this.vy = 0;
+      this.trail.push({ x: this.x, y: this.y, face: this.face, t: 0 });
+      if (this.dashT <= 0) { this.vx = this.face * this.run; this.grace = 0.15; }
+    } else {
+      const dir = this.stun > 0 ? 0 : (Input.right ? 1 : 0) - (Input.left ? 1 : 0);
+      const maxS = Input.run ? this.run : this.walk;
+      if (this.stun <= 0) {
+        const acc = this.onGround ? C.groundAcceleration : C.airAcceleration;
+        const dec = this.onGround ? C.groundDeceleration : C.airDeceleration;
+        if (dir === 0) this.vx = this.approach(this.vx, 0, dec * dt);
+        else {
+          this.face = dir;
+          const target = dir * maxS;
+          if (Math.sign(this.vx) === -dir) this.vx = this.approach(this.vx, target, (dec + acc) * dt);
+          else if (Math.abs(this.vx) > maxS) this.vx = this.approach(this.vx, target, dec * dt);
+          else this.vx = this.approach(this.vx, target, acc * dt);
+        }
+      }
+      if (this.jumpBuffer > 0 && this.coyote > 0) {
+        this.vy = this.jumpV; this.jumpBuffer = 0; this.coyote = 0; this.onGround = false; this.cut = false;
+        Sound.play("jump");
+      }
+      if (this.vy < 0 && !Input.jumpHeld && !this.cut) { this.vy *= C.jumpCutMultiplier; this.cut = true; }
+      this.vy = Math.min(this.vy + C.gravity * dt, C.maxFallSpeed);
     }
-    if (this.vy < 0 && !Input.jumpHeld && !this.cut) { this.vy *= C.jumpCutMultiplier; this.cut = true; }
-    this.vy = Math.min(this.vy + C.gravity * dt, C.maxFallSpeed);
 
-    if (Collision.moveX(lv, this, this.vx * dt)) this.vx = 0;
+    if (Collision.moveX(lv, this, this.vx * dt)) { this.vx = 0; if (dashing) this.dashT = 0; }
     if (this.x < 0) { this.x = 0; this.vx = 0; }
     const r = Collision.moveY(lv, this, this.vy * dt);
     this.onGround = r.ground;
+    if (r.ground) this.airDash = false;
     if (r.ceil) game.bumpTile(r.ceil.c, r.ceil.r);
     this.anim += Math.abs(this.vx) * dt * 0.06;
+    for (const q of this.trail) q.t += dt;
+    this.trail = this.trail.filter(q => q.t < 0.25);
   }
 }
 
 /* ================= Enemy ================= */
 class Enemy {
   constructor(s) {
-    Object.assign(this, { x: s.x, y: s.y, w: CONFIG.enemyW, h: CONFIG.enemyH, minX: s.minX, maxX: s.maxX,
-      vx: 0, vy: 0, dir: -1, prevY: s.y, onGround: false, dead: false, deadT: 0, anim: Math.random() * 6 });
+    const d = ENEMY_DIM[s.kind];
+    Object.assign(this, { kind: s.kind, x: s.x, y: s.y, w: d[0], h: d[1], minX: s.minX, maxX: s.maxX, baseY: s.baseY || 0,
+      vx: 0, vy: 0, dir: -1, prevY: s.y, onGround: false, dead: false, deadT: 0, hopT: Math.random(), t: Math.random() * 6, anim: Math.random() * 6 });
+    this.stompable = s.kind !== "spiky";
+    this.speed = { walker: 55, spiky: 45, hopper: 60, flyer: 55 }[s.kind];
   }
   update(dt, lv) {
     const C = CONFIG, T = C.tileSize;
     this.prevY = this.y;
-    if (this.dead) { this.deadT += dt; return; }
+    if (this.dead) { this.deadT += dt; if (this.kind === "flyer") this.y += 260 * dt; return; }
     this.anim += dt * 8;
     if (this.x <= this.minX) this.dir = 1;
     else if (this.x + this.w >= this.maxX) this.dir = -1;
+    if (this.kind === "flyer") {
+      this.t += dt; this.x += this.dir * this.speed * dt;
+      this.y = this.baseY - this.h / 2 + Math.sin(this.t * 2.6) * 26;
+      return;
+    }
     if (this.onGround) {
       const lookX = this.dir > 0 ? this.x + this.w + 1 : this.x - 1;
       if (!lv.solid(Math.floor(lookX / T), Math.floor((this.y + this.h + 2) / T))) this.dir = -this.dir;
     }
+    if (this.kind === "hopper") {
+      this.hopT += dt;
+      if (this.onGround && this.hopT > 1.2) { this.vy = -380; this.hopT = 0; this.onGround = false; }
+    }
     this.vy = Math.min(this.vy + C.gravity * dt, C.maxFallSpeed);
-    if (Collision.moveX(lv, this, this.dir * C.enemySpeed * dt)) this.dir = -this.dir;
+    if (Collision.moveX(lv, this, this.dir * this.speed * dt)) this.dir = -this.dir;
     const r = Collision.moveY(lv, this, this.vy * dt);
     this.onGround = r.ground;
   }
@@ -372,37 +456,135 @@ class Camera {
 
 /* ================= Game ================= */
 const Game = {
-  state: "start", level: null, player: null, enemies: [], seeds: [], particles: [], popups: [],
+  state: "start", selected: 0, level: null, player: null, enemies: [], seeds: [], particles: [], popups: [],
+  projectiles: [], buffItems: [], buffTimer: 0,
   camera: new Camera(), score: 0, seedCount: 0, time: 0, acc: 0, last: 0, clock: 0, loseReason: "",
+  get character() { return CHARACTERS[this.selected]; },
   init() {
     this.reset(); this.state = "start";
     requestAnimationFrame(t => { this.last = t; this.frame(t); });
   },
   reset() {
     this.level = new Level();
-    this.player = new Player(this.level.spawn);
+    this.player = new Player(this.level.spawn, this.character);
     this.enemies = this.level.enemySpawns.map(s => new Enemy(s));
     this.seeds = this.level.seedSpawns.map(s => ({ x: s.x, y: s.y, got: false }));
-    this.particles = []; this.popups = [];
+    this.particles = []; this.popups = []; this.projectiles = []; this.buffItems = [];
     this.score = 0; this.seedCount = 0; this.time = 0; this.acc = 0; this.loseReason = "";
-    Input.jumpPressed = false;
+    Input.jumpPressed = false; Input.attackPressed = false; Input.dashPressed = false;
+    this.buffTimer = 4;
+    for (let i = 0; i < CONFIG.buffInitial; i++) this.spawnBuff(true);
     this.camera.snap(this.player, this.level);
   },
   startPlay() { this.reset(); this.state = "play"; },
+  toTitle() { this.reset(); this.state = "start"; },
   pauseIfPlaying() { if (this.state === "play") this.state = "paused"; },
   onKey(code) {
+    if (this.state === "start") {
+      if (code === "ArrowLeft" || code === "KeyA" || code === "Digit1") { this.selected = 0; return; }
+      if (code === "ArrowRight" || code === "KeyD" || code === "Digit2") { this.selected = 1; return; }
+    }
     if (code === "KeyR") { this.startPlay(); return; }
     if (code === "KeyM") { Sound.musicOn = !Sound.musicOn; return; }
+    if (code === "KeyQ" || code === "KeyT") { if (this.state !== "start") this.toTitle(); return; }
     if (code === "KeyP") {
       if (this.state === "play") this.state = "paused";
       else if (this.state === "paused") { this.state = "play"; this.acc = 0; Input.jumpPressed = false; }
       return;
     }
     if (code === "Enter" || code === "Space") {
-      if (this.state === "start") { this.startPlay(); }
+      if (this.state === "start") this.startPlay();
       else if (this.state === "paused") { this.state = "play"; this.acc = 0; Input.jumpPressed = false; }
       else if (this.state === "lose" || this.state === "win") this.startPlay();
     }
+  },
+  /* ---------- buff 刷新 ---------- */
+  spawnBuff(initial) {
+    const C = CONFIG, lv = this.level, p = this.player;
+    if (this.buffItems.length >= C.buffMaxActive) return;
+    let spots = lv.buffSpots.filter((s, i) => !this.buffItems.some(b => b.spot === i));
+    spots = spots.map(s => s).filter(s => Math.abs(s.x - p.x) > 120);
+    if (!initial) {
+      const ahead = spots.filter(s => s.x > p.x - 250 && s.x < p.x + 1100);
+      if (ahead.length) spots = ahead;
+    } else spots = spots.filter(s => s.x > 500);
+    if (!spots.length) return;
+    const s = spots[Math.floor(Math.random() * spots.length)];
+    const pool = [["fire", 3], ["boom", 3], ["star", 2]];
+    if (p.lives < C.maxLives) pool.push(["heal", 1.5]);
+    let sum = pool.reduce((a, b) => a + b[1], 0), r = Math.random() * sum, type = pool[0][0];
+    for (const it of pool) { r -= it[1]; if (r <= 0) { type = it[0]; break; } }
+    this.buffItems.push({ type, x: s.x, y: s.y, spot: lv.buffSpots.indexOf(s), t: 0, w: 22, h: 22 });
+  },
+  applyBuff(type) {
+    const C = CONFIG, p = this.player;
+    if (type === "fire") p.buffs.fire = C.fireDuration;
+    else if (type === "boom") p.buffs.boom = C.boomDuration;
+    else if (type === "star") p.buffs.star = C.starDuration;
+    else if (type === "heal") {
+      if (p.lives < C.maxLives) p.lives++; else this.score += 300;
+    }
+    this.popups.push({ x: p.x + p.w / 2, y: p.y - 6, t: 0, text: BUFF_NAMES[type] + "！" });
+    this.spark(p.x + p.w / 2, p.y + p.h / 2, "#ffe36e", 10);
+    Sound.play("buff");
+  },
+  /* ---------- 攻擊 ---------- */
+  tryAttack() {
+    const p = this.player, C = CONFIG;
+    if (p.atkCd > 0) return;
+    const hasF = p.buffs.fire > 0, hasB = p.buffs.boom > 0;
+    if (!hasF && !hasB) return;
+    let useFire = hasF;
+    if (hasF && hasB) { useFire = p.alt; p.alt = !p.alt; }
+    const cx = p.face > 0 ? p.x + p.w : p.x - 10;
+    if (useFire) {
+      this.projectiles.push({ kind: "fire", x: cx, y: p.y + 10, w: 10, h: 10, vx: p.face * C.fireSpeed, vy: 0, life: 2.2, dead: false });
+      p.atkCd = C.fireCooldown; Sound.play("fire");
+    } else {
+      if (this.projectiles.some(q => q.kind === "boom" && !q.dead)) return;
+      this.projectiles.push({ kind: "boom", x: cx, y: p.y + 8, w: 16, h: 16, vx: p.face * C.boomSpeed, vy: 0, t: 0, back: false, dead: false });
+      p.atkCd = C.boomCooldown; Sound.play("boom");
+    }
+  },
+  updateProjectiles(dt) {
+    const lv = this.level, p = this.player, C = CONFIG;
+    for (const q of this.projectiles) {
+      if (q.dead) continue;
+      if (q.kind === "fire") {
+        q.life -= dt; q.vy = Math.min(q.vy + 1100 * dt, 600);
+        if (Collision.moveX(lv, q, q.vx * dt)) q.dead = true;
+        const r = Collision.moveY(lv, q, q.vy * dt);
+        if (r.ground) q.vy = -300;
+        if (q.life <= 0 || q.y > lv.pxH + 40) q.dead = true;
+        for (const e of this.enemies) {
+          if (!e.dead && Collision.overlap(q, e)) { this.killEnemy(e, C.killScore); q.dead = true; break; }
+        }
+      } else {
+        q.t += dt;
+        if (!q.back) { q.x += q.vx * dt; if (q.t > C.boomOutTime) q.back = true; }
+        else {
+          const dx = p.x + p.w / 2 - (q.x + q.w / 2), dy = p.y + p.h / 2 - (q.y + q.h / 2), d = Math.hypot(dx, dy);
+          if (d < 18) q.dead = true; else { q.x += dx / d * C.boomReturnSpeed * dt; q.y += dy / d * C.boomReturnSpeed * dt; }
+        }
+        if (q.t > 3) q.dead = true;
+        for (const e of this.enemies) if (!e.dead && Collision.overlap(q, e)) this.killEnemy(e, C.killScore);
+        for (const s of this.seeds) {
+          if (!s.got && Math.abs(s.x - (q.x + q.w / 2)) < 16 && Math.abs(s.y - (q.y + q.h / 2)) < 16) this.collectSeed(s);
+        }
+      }
+    }
+    this.projectiles = this.projectiles.filter(q => !q.dead);
+  },
+  killEnemy(e, score) {
+    e.dead = true; e.deadT = 0;
+    this.score += score;
+    this.popups.push({ x: e.x + e.w / 2, y: e.y, t: 0, text: "+" + score });
+    this.spark(e.x + e.w / 2, e.y + e.h / 2, "#9fe8d8", 8);
+    Sound.play("stomp");
+  },
+  collectSeed(s) {
+    s.got = true; this.seedCount++; this.score += CONFIG.seedScore;
+    this.spark(s.x, s.y, "#fff2a0", 6); Sound.play("seed");
   },
   bumpTile(c, r) {
     const lv = this.level;
@@ -420,44 +602,94 @@ const Game = {
       this.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60, t: 0, life: 0.4 + Math.random() * 0.3, col });
     }
   },
-  hurt(e) {
+  damage(srcX, upVel, reason) {
     const p = this.player;
     p.lives--; p.inv = CONFIG.invincibleTime; p.stun = CONFIG.hurtStun;
-    p.vx = ((p.x + p.w / 2) < (e.x + e.w / 2) ? -1 : 1) * 170; p.vy = -260; p.onGround = false;
+    p.vx = ((p.x + p.w / 2) < srcX ? -1 : 1) * 170; p.vy = upVel; p.onGround = false; p.dashT = 0;
     this.spark(p.x + p.w / 2, p.y + p.h / 2, "#ff7a6a", 8);
-    if (p.lives <= 0) { p.lives = 0; this.lose("被機械甲蟲擊倒了"); } else Sound.play("hurt");
+    if (p.lives <= 0) { p.lives = 0; this.lose(reason); } else Sound.play("hurt");
   },
   lose(reason) { this.state = "lose"; this.loseReason = reason; Sound.play("lose"); },
+  /* ---------- 崩塌平台 ---------- */
+  updateCrumble(dt) {
+    const lv = this.level, p = this.player, T = 32;
+    if (p.onGround) {
+      const row = Math.floor((p.y + p.h + 1) / T);
+      const c0 = Math.floor(p.x / T), c1 = Math.floor((p.x + p.w - 0.01) / T);
+      for (let c = c0; c <= c1; c++) {
+        if (lv.tile(c, row) === 6) {
+          const key = row * lv.cols + c;
+          if (!lv.crumble[key]) lv.crumble[key] = { c, r: row, state: "shake", t: 0 };
+        }
+      }
+    }
+    for (const key in lv.crumble) {
+      const st = lv.crumble[key]; st.t += dt;
+      if (st.state === "shake" && st.t >= CONFIG.crumbleDelay) {
+        lv.tiles[st.r][st.c] = 0; st.state = "gone"; st.t = 0;
+        this.spark(st.c * T + 16, st.r * T + 16, "#a98a5a", 6);
+      } else if (st.state === "gone" && st.t >= CONFIG.crumbleRespawn) {
+        const box = { x: st.c * T, y: st.r * T, w: T, h: T };
+        if (!Collision.overlap(p, box)) { lv.tiles[st.r][st.c] = 6; delete lv.crumble[key]; }
+      }
+    }
+  },
   update(dt) {
     const p = this.player, lv = this.level, C = CONFIG;
     this.time += dt;
     p.update(dt, this);
+    if (Input.attackPressed) { Input.attackPressed = false; this.tryAttack(); }
     for (const e of this.enemies) e.update(dt, lv);
     this.enemies = this.enemies.filter(e => !(e.dead && e.deadT > 0.35));
+    this.updateProjectiles(dt);
+    this.updateCrumble(dt);
+
+    // 玩家與敵人
     for (const e of this.enemies) {
       if (e.dead || !Collision.overlap(p, e)) continue;
+      if (p.buffs.star > 0 || p.dashing) { this.killEnemy(e, p.dashing ? C.dashKillScore : C.killScore); continue; }
       const stomp = p.vy > 0 && (p.prevY + p.h) <= (e.prevY + C.stompTolerance);
-      if (stomp) {
+      if (stomp && e.stompable) {
         e.dead = true; e.deadT = 0;
-        p.vy = Input.jumpHeld ? C.stompBounceHeld : C.stompBounce; p.cut = true; p.onGround = false;
+        p.vy = Input.jumpHeld ? C.stompBounceHeld : C.stompBounce; p.cut = true; p.onGround = false; p.airDash = false;
         this.score += C.stompScore;
         this.popups.push({ x: e.x + e.w / 2, y: e.y, t: 0, text: "+" + C.stompScore });
         this.spark(e.x + e.w / 2, e.y + e.h / 2, "#9fe8d8", 8);
         Sound.play("stomp");
-      } else if (p.inv <= 0) {
-        this.hurt(e);
+      } else if (p.inv <= 0 && p.grace <= 0) {
+        this.damage(e.x + e.w / 2, -260, e.kind === "spiky" ? "被刺甲蟲刺傷了" : "被機械甲蟲擊倒了");
         if (this.state !== "play") return;
       }
     }
+    // 尖刺
+    if (p.inv <= 0 && p.grace <= 0 && p.buffs.star <= 0 && !p.dashing) {
+      const c0 = Math.floor(p.x / 32), c1 = Math.floor((p.x + p.w - 0.01) / 32);
+      const r0 = Math.floor(p.y / 32), r1 = Math.floor((p.y + p.h - 0.01) / 32);
+      outer:
+      for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+        if (lv.tile(c, r) === 5) {
+          const box = { x: c * 32 + 4, y: r * 32 + 14, w: 24, h: 18 };
+          if (Collision.overlap(p, box)) { this.damage(c * 32 + 16, -380, "被尖刺刺傷了"); break outer; }
+        }
+      }
+      if (this.state !== "play") return;
+    }
+    // 種子
     const box = { x: 0, y: 0, w: 16, h: 16 };
     for (const s of this.seeds) {
       if (s.got) continue;
       box.x = s.x - 8; box.y = s.y - 8;
-      if (Collision.overlap(p, box)) {
-        s.got = true; this.seedCount++; this.score += C.seedScore;
-        this.spark(s.x, s.y, "#fff2a0", 6); Sound.play("seed");
-      }
+      if (Collision.overlap(p, box)) this.collectSeed(s);
     }
+    // buff 道具
+    for (const b of this.buffItems) {
+      b.t += dt;
+      if (Collision.overlap(p, b)) { this.applyBuff(b.type); b.t = 1e9; }
+    }
+    this.buffItems = this.buffItems.filter(b => b.t < C.buffLife);
+    this.buffTimer -= dt;
+    if (this.buffTimer <= 0) { this.spawnBuff(false); this.buffTimer = C.buffSpawnMin + Math.random() * (C.buffSpawnMax - C.buffSpawnMin); }
+
     if (lv.bump) { lv.bump.t += dt; if (lv.bump.t > 0.2) lv.bump = null; }
     for (const q of this.particles) { q.t += dt; q.vy += 600 * dt; q.x += q.vx * dt; q.y += q.vy * dt; }
     this.particles = this.particles.filter(q => q.t < q.life);
@@ -531,10 +763,14 @@ const Renderer = {
       const t = lv.tiles[r][c]; if (!t) continue;
       let x = c * T - cx, y = r * T;
       if (lv.bump && lv.bump.c === c && lv.bump.r === r) y -= Math.sin(lv.bump.t / 0.2 * Math.PI) * 8;
-      this.tile(t, x, y, lv.tile(c, r - 1) === 0, c, r);
+      if (t === 6) {
+        const st = lv.crumble[r * lv.cols + c];
+        if (st && st.state === "shake" && st.t > 0.3) x += Math.round(Math.sin(st.t * 70) * 2);
+      }
+      this.tile(t, x, y, lv.tile(c, r - 1) === 0 || lv.tile(c, r - 1) === 5);
     }
   },
-  tile(t, x, y, top, c, r) {
+  tile(t, x, y, top) {
     const R = this.R.bind(this);
     if (t === 1) {
       R(x, y, 32, 32, "#6b4a33"); R(x + 4, y + 12, 4, 4, "#8a6446"); R(x + 20, y + 20, 6, 4, "#8a6446"); R(x + 12, y + 26, 4, 4, "#54382a");
@@ -549,6 +785,16 @@ const Renderer = {
       R(x + 4, y + 4, 2, 2, "#8a5a10"); R(x + 26, y + 4, 2, 2, "#8a5a10"); R(x + 4, y + 26, 2, 2, "#8a5a10"); R(x + 26, y + 26, 2, 2, "#8a5a10");
     } else if (t === 4) {
       R(x, y, 32, 32, "#4a4440"); R(x + 2, y + 2, 28, 28, "#7a726a"); R(x + 4, y + 4, 24, 24, "#6a625b"); R(x + 8, y + 14, 16, 4, "#4a4440");
+    } else if (t === 5) {
+      for (let i = 0; i < 4; i++) {
+        const sx = x + i * 8;
+        R(sx, y + 28, 8, 4, "#5a6068"); R(sx + 1, y + 22, 6, 6, "#aab2ba"); R(sx + 2, y + 16, 4, 6, "#c8d0d8"); R(sx + 3, y + 12, 2, 4, "#e6ecf0");
+        R(sx + 5, y + 18, 1, 10, "#8a929a");
+      }
+    } else if (t === 6) {
+      R(x, y, 32, 32, "#7a5a3a"); R(x + 2, y + 2, 28, 28, "#b08a58"); R(x + 4, y + 4, 24, 4, "#d2aa72");
+      R(x + 8, y + 10, 2, 12, "#6a4a2a"); R(x + 20, y + 14, 2, 14, "#6a4a2a"); R(x + 10, y + 20, 8, 2, "#6a4a2a");
+      R(x, y + 30, 32, 2, "#4a3420");
     }
   },
   portal(game) {
@@ -576,7 +822,39 @@ const Renderer = {
       this.R(x - 1, y - 12, 2, 4, "#4fae5a");
     }
   },
-  enemy(e, cx, clock) {
+  icon(type, x, y, u) {
+    const R = this.R.bind(this);
+    if (type === "fire") {
+      R(x + 4 * u, y, 2 * u, 2 * u, "#ffb02e"); R(x + 3 * u, y + 2 * u, 4 * u, 3 * u, "#ff6a1a");
+      R(x + 2 * u, y + 5 * u, 6 * u, 4 * u, "#ff4a1a"); R(x + 4 * u, y + 5 * u, 2 * u, 3 * u, "#fff2a0");
+    } else if (type === "boom") {
+      R(x + 1 * u, y + 1 * u, 3 * u, 8 * u, "#9fe0ff"); R(x + 1 * u, y + 6 * u, 8 * u, 3 * u, "#9fe0ff");
+      R(x + 2 * u, y + 2 * u, 1 * u, 6 * u, "#e8f8ff");
+    } else if (type === "star") {
+      const c = "#ffe36e";
+      R(x + 4 * u, y, 2 * u, 3 * u, c); R(x, y + 3 * u, 10 * u, 3 * u, c); R(x + 2 * u, y + 6 * u, 6 * u, 2 * u, c);
+      R(x + 1 * u, y + 8 * u, 3 * u, 2 * u, c); R(x + 6 * u, y + 8 * u, 3 * u, 2 * u, c); R(x + 4 * u, y + 3 * u, 2 * u, 2 * u, "#fff7c0");
+    } else {
+      const c = "#ff5a6e";
+      R(x + 1 * u, y + 1 * u, 3 * u, 2 * u, c); R(x + 6 * u, y + 1 * u, 3 * u, 2 * u, c); R(x, y + 3 * u, 10 * u, 3 * u, c);
+      R(x + 1 * u, y + 6 * u, 8 * u, 1 * u, c); R(x + 3 * u, y + 7 * u, 4 * u, 1 * u, c); R(x + 4 * u, y + 8 * u, 2 * u, 1 * u, c);
+    }
+  },
+  buffItems(game) {
+    const cx = Math.round(game.camera.x);
+    for (const b of game.buffItems) {
+      const left = CONFIG.buffLife - b.t;
+      if (left < 5 && Math.floor(left * 6) % 2 === 0) continue;
+      const x = b.x - cx; if (x < -30 || x > CONFIG.width + 30) continue;
+      const y = b.y + Math.sin(game.clock * 4 + b.x) * 3;
+      const glow = "hsl(" + ((game.clock * 120) % 360 | 0) + ",90%,65%)";
+      this.R(x - 3, y - 3, 28, 28, glow);
+      this.R(x - 1, y - 1, 24, 24, "#14343a");
+      this.R(x + 1, y + 1, 20, 20, "#264f55");
+      this.icon(b.type, x + 1, y + 1, 2);
+    }
+  },
+  enemy(e, cx) {
     const ctx = this.ctx, x = e.x - cx;
     if (x < -40 || x > CONFIG.width + 40) return;
     ctx.save();
@@ -585,31 +863,94 @@ const Renderer = {
     ctx.translate(0, -e.h);
     const R = (a, b, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(a, b, w, h); };
     const f = Math.floor(e.anim) % 2;
-    R(4 + f, 16, 3, 4, "#2a3b42"); R(11 - f, 16, 3, 4, "#2a3b42"); R(18 + f, 16, 3, 4, "#2a3b42");
-    R(2, 4, 22, 12, "#2f7f86"); R(4, 2, 18, 3, "#2f7f86"); R(12, 3, 2, 13, "#1d4f55");
-    R(5, 6, 6, 3, "#6fd0d0"); R(16, 6, 4, 2, "#4aa9ad");
-    R(20, 8, 6, 8, "#24464c"); R(23, 10, 2, 2, "#ff5a4a"); R(24, 5, 2, 4, "#24464c");
-    R(0, 10, 3, 4, "#d6a638");
+    if (e.kind === "walker") {
+      R(4 + f, 16, 3, 4, "#2a3b42"); R(11 - f, 16, 3, 4, "#2a3b42"); R(18 + f, 16, 3, 4, "#2a3b42");
+      R(2, 4, 22, 12, "#2f7f86"); R(4, 2, 18, 3, "#2f7f86"); R(12, 3, 2, 13, "#1d4f55");
+      R(5, 6, 6, 3, "#6fd0d0"); R(16, 6, 4, 2, "#4aa9ad");
+      R(20, 8, 6, 8, "#24464c"); R(23, 10, 2, 2, "#ff5a4a"); R(24, 5, 2, 4, "#24464c");
+      R(0, 10, 3, 4, "#d6a638");
+    } else if (e.kind === "spiky") {
+      R(4 + f, 16, 3, 4, "#3a2a40"); R(12 - f, 16, 3, 4, "#3a2a40"); R(20 + f, 16, 3, 4, "#3a2a40");
+      R(2, 6, 24, 10, "#7a3a8a"); R(4, 4, 20, 3, "#7a3a8a"); R(6, 8, 6, 3, "#a85cc0");
+      for (let i = 0; i < 4; i++) { R(4 + i * 6, 0, 3, 5, "#e8e0f0"); R(5 + i * 6, -2, 1, 3, "#ffffff"); }
+      R(22, 8, 6, 8, "#3a2a40"); R(25, 10, 2, 2, "#ff5a4a");
+    } else if (e.kind === "hopper") {
+      const air = !e.onGround;
+      R(4, air ? 18 : 16, 3, air ? 4 : 6, "#2a4a20"); R(17, air ? 18 : 16, 3, air ? 4 : 6, "#2a4a20");
+      R(2, 6, 20, 12, "#8aa83a"); R(4, 4, 16, 3, "#a6c850"); R(10, 6, 2, 12, "#5a7a20");
+      R(5, 8, 5, 3, "#d0e87a"); R(17, 7, 5, 6, "#2a4a20"); R(19, 8, 2, 2, "#ff5a4a");
+      R(18, 1, 2, 4, "#2a4a20");
+    } else {
+      R(0, 6, 26, 4, (f ? "#cfd8dc" : "#90a4ae")); R(11, 3, 4, 4, "#546e7a");
+      R(3, 8, 20, 8, "#6a4aa8"); R(5, 6, 16, 3, "#8a6ac8"); R(7, 10, 5, 3, "#b49ae8");
+      R(17, 10, 5, 4, "#2a1a48"); R(19, 11, 2, 2, "#ff5a4a"); R(11, 16, 4, 2, "#3a2a58");
+    }
     ctx.restore();
   },
-  player(p, cx, clock) {
-    if (p.inv > 0 && Math.floor(p.inv * 14) % 2 === 0) return;
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.translate(Math.round(p.x - cx + (p.face > 0 ? 0 : p.w)), Math.round(p.y));
-    ctx.scale(p.face > 0 ? 1 : -1, 1);
+  sprite(kind, ctx, face, anim, onGround, vx, scale, clock) {
     const R = (a, b, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(a, b, w, h); };
-    const f = p.onGround && Math.abs(p.vx) > 20 ? Math.floor(p.anim) % 2 : 0;
-    const air = !p.onGround;
+    ctx.save();
+    ctx.scale(face > 0 ? scale : -scale, scale);
+    if (face < 0) ctx.translate(-24, 0);
+    const f = onGround && Math.abs(vx) > 20 ? Math.floor(anim) % 2 : 0;
+    const air = !onGround;
     const sw = (x, ff) => x + (air ? 0 : ff * 2);
-    R(sw(4, f), 26, 7, 4, "#5a3a22"); R(sw(13, -f), 26 - (air ? 2 : 0), 7, 4, "#5a3a22");
-    R(5, 14, 14, 12, "#3c9a55"); R(5, 21, 14, 2, "#c9a05a"); R(3, 15, 3, 8, "#2f7a45"); R(18, 15, 3, 8, "#2f7a45");
-    R(15, 17, 4, 4, "#e6c46a");
-    R(6, 5, 12, 9, "#f0c9a0");
-    R(4, 4, 16, 3, "#c9a05a"); R(7, 0, 10, 4, "#d8b36a");
-    R(6, 7, 13, 2, "#2c2c34"); R(11, 6, 5, 5, "#5ee0f0"); R(6, 6, 5, 5, "#5ee0f0"); R(12, 7, 2, 2, "#ffffff"); R(7, 7, 2, 2, "#ffffff");
-    R(11, -4, 2, 4, "#4fae5a"); R(13, -6, 5, 3, "#7bd98a"); R(7, -4, 4, 3, "#7bd98a");
+    if (kind === "explorer") {
+      R(sw(4, f), 26, 7, 4, "#5a3a22"); R(sw(13, -f), 26 - (air ? 2 : 0), 7, 4, "#5a3a22");
+      R(5, 14, 14, 12, "#3c9a55"); R(5, 21, 14, 2, "#c9a05a"); R(3, 15, 3, 8, "#2f7a45"); R(18, 15, 3, 8, "#2f7a45");
+      R(15, 17, 4, 4, "#e6c46a");
+      R(6, 5, 12, 9, "#f0c9a0");
+      R(4, 4, 16, 3, "#c9a05a"); R(7, 0, 10, 4, "#d8b36a");
+      R(6, 7, 13, 2, "#2c2c34"); R(11, 6, 5, 5, "#5ee0f0"); R(6, 6, 5, 5, "#5ee0f0"); R(12, 7, 2, 2, "#ffffff"); R(7, 7, 2, 2, "#ffffff");
+      R(11, -4, 2, 4, "#4fae5a"); R(13, -6, 5, 3, "#7bd98a"); R(7, -4, 4, 3, "#7bd98a");
+    } else {
+      const fl = Math.floor((clock || 0) * 10) % 2;
+      R(-6, 7 + fl, 8, 3, "#c0283a"); R(-10, 10 + fl * 2, 6, 3, "#9a1f2f");
+      R(sw(4, f), 26, 7, 4, "#17171f"); R(sw(13, -f), 26 - (air ? 2 : 0), 7, 4, "#17171f");
+      R(5, 14, 14, 12, "#2a2a3a"); R(5, 21, 14, 2, "#7a1f2b"); R(3, 15, 3, 8, "#22222e"); R(18, 15, 3, 8, "#22222e");
+      R(1, 8, 2, 14, "#c8d0d8"); R(0, 21, 4, 2, "#7a1f2b");
+      R(4, 1, 16, 13, "#22222e"); R(6, 0, 12, 3, "#2c2c3a");
+      R(9, 6, 11, 6, "#f0c9a0"); R(4, 5, 16, 2, "#c0283a");
+      R(15, 8, 3, 2, "#ffffff"); R(16, 8, 2, 2, "#ff4a5a"); R(9, 11, 11, 3, "#22222e");
+    }
     ctx.restore();
+  },
+  player(game, cx) {
+    const p = game.player, ctx = this.ctx;
+    for (const q of p.trail) {
+      ctx.globalAlpha = Math.max(0, 0.45 - q.t * 1.8);
+      this.R(q.x - cx, q.y, p.w, p.h, "#6a6fd0");
+    }
+    ctx.globalAlpha = 1;
+    if (p.inv > 0 && Math.floor(p.inv * 14) % 2 === 0) return;
+    if (p.buffs.star > 0 && (p.buffs.star > 2 || Math.floor(p.buffs.star * 8) % 2 === 0)) {
+      ctx.globalAlpha = 0.55;
+      this.R(p.x - cx - 4, p.y - 6, p.w + 8, p.h + 10, "hsl(" + ((game.clock * 400) % 360 | 0) + ",95%,60%)");
+      ctx.globalAlpha = 1;
+    }
+    ctx.save();
+    ctx.translate(Math.round(p.x - cx), Math.round(p.y));
+    this.sprite(p.kind, ctx, p.face, p.anim, p.onGround, p.vx, 1, game.clock);
+    if (p.buffs.fire > 0) {
+      const fx = p.face > 0 ? 20 : -6;
+      this.R(fx, 16, 6, 6, "#ff6a1a"); this.R(fx + 1, 14, 4, 4, "#ffd24a");
+    }
+    ctx.restore();
+  },
+  projectiles(game, cx) {
+    const ctx = this.ctx;
+    for (const q of game.projectiles) {
+      const x = q.x - cx;
+      if (q.kind === "fire") {
+        this.R(x - 2, q.y - 2, 14, 14, "rgba(255,120,30,0.45)");
+        this.R(x, q.y, 10, 10, "#ff7a1a"); this.R(x + 2, q.y + 2, 6, 6, "#ffd24a"); this.R(x + 4, q.y + 4, 2, 2, "#ffffff");
+      } else {
+        ctx.save();
+        ctx.translate(Math.round(x + 8), Math.round(q.y + 8)); ctx.rotate(game.clock * 18);
+        this.R(-8, -8, 16, 5, "#9fe0ff"); this.R(-8, -8, 5, 16, "#9fe0ff"); this.R(-6, -6, 10, 2, "#e8f8ff");
+        ctx.restore();
+      }
+    }
   },
   text(s, x, y, size, col, align) {
     const ctx = this.ctx;
@@ -632,19 +973,36 @@ const Renderer = {
   hud(game) {
     const p = game.player;
     this.R(0, 0, CONFIG.width, 40, "rgba(10,40,45,0.55)");
-    for (let i = 0; i < CONFIG.lives; i++) this.heart(14 + i * 28, 11, i < p.lives);
-    this.text("分數 " + String(game.score).padStart(5, "0"), 100, 20, 20, "#fff");
-    this.text("種子 " + game.seedCount + "/" + game.level.totalSeeds, 300, 20, 20, "#ffe36e");
-    this.text("時間 " + game.time.toFixed(1) + " 秒", 500, 20, 20, "#cfeff0");
-    if (!Touch.enabled) this.text("P 暫停　R 重新開始　M 音樂" + (Sound.musicOn ? "開" : "關"), 946, 20, 14, "#cfeff0", "right");
+    for (let i = 0; i < CONFIG.maxLives; i++) this.heart(14 + i * 28, 11, i < p.lives);
+    this.text("分數 " + String(game.score).padStart(5, "0"), 136, 20, 20, "#fff");
+    this.text("種子 " + game.seedCount + "/" + game.level.totalSeeds, 330, 20, 20, "#ffe36e");
+    this.text("時間 " + game.time.toFixed(1) + " 秒", 530, 20, 20, "#cfeff0");
+    if (!Touch.enabled) this.text("P 暫停　R 重開　M 音樂" + (Sound.musicOn ? "開" : "關"), 946, 20, 14, "#cfeff0", "right");
+    let i = 0;
+    for (const k of ["fire", "boom", "star"]) {
+      if (p.buffs[k] <= 0) continue;
+      const x = 14 + i * 96, y = 48;
+      this.R(x - 2, y - 2, 28, 28, "#14343a"); this.icon(k, x, y, 2);
+      this.text(p.buffs[k].toFixed(1) + "s", x + 32, y + 12, 16, p.buffs[k] < 3 ? "#ff8a7a" : "#fff");
+      i++;
+    }
+    if (p.hasDash) {
+      const ready = p.dashCd <= 0;
+      this.text("衝刺 " + (ready ? "就緒" : p.dashCd.toFixed(1) + "s"), 14 + i * 96, 90, 14, ready ? "#9bf0a8" : "#9aa8aa");
+    }
   },
-  touchControls() {
-    const ctx = this.ctx;
+  touchControls(game) {
+    const ctx = this.ctx, p = game.player;
+    const hasWeapon = p.buffs.fire > 0 || p.buffs.boom > 0;
     for (const k in Touch.btns) {
+      if (!Touch.visible(k)) continue;
       const b = Touch.btns[k], on = Touch.has(k), small = (k === "pause" || k === "restart");
-      ctx.globalAlpha = on ? 0.75 : (small ? 0.5 : 0.4);
+      let a = on ? 0.75 : (small ? 0.5 : 0.4);
+      if (k === "attack" && !hasWeapon) a = 0.2;
+      if (k === "dash" && p.dashCd > 0) a = 0.2;
+      ctx.globalAlpha = a;
       this.R(b.x, b.y, b.w, b.h, on ? "#ffe36e" : "#0d2a30");
-      this.R(b.x + 4, b.y + 4, b.w - 8, b.h - 8, on ? "#fff3b0" : "#2c6a70");
+      this.R(b.x + 4, b.y + 4, b.w - 8, b.h - 8, on ? "#fff3b0" : (k === "attack" ? "#7a3a1a" : "#2c6a70"));
       ctx.globalAlpha = 0.95;
       this.text(b.label, b.x + b.w / 2, b.y + b.h / 2, small ? 22 : 34, "#ffffff", "center");
     }
@@ -656,47 +1014,64 @@ const Renderer = {
     this.tiles(game);
     this.portal(game);
     this.seeds(game);
-    for (const e of game.enemies) this.enemy(e, cx, game.clock);
-    this.player(game.player, cx, game.clock);
+    this.buffItems(game);
+    for (const e of game.enemies) this.enemy(e, cx);
+    this.projectiles(game, cx);
+    this.player(game, cx);
     for (const q of game.particles) this.R(q.x - cx, q.y, 4, 4, q.col);
     for (const q of game.popups) this.text(q.text, q.x - cx, q.y - q.t * 40, 16, "#fff7b0", "center");
     this.hud(game);
-    if (Touch.enabled && game.state === "play") this.touchControls();
+    if (Touch.enabled && game.state === "play") this.touchControls(game);
     UI.draw(this, game);
   }
 };
 
 /* ================= UI ================= */
 const UI = {
+  card(r, game, i, x, y, w, h) {
+    const ch = CHARACTERS[i], sel = game.selected === i, ctx = r.ctx;
+    r.R(x - 3, y - 3, w + 6, h + 6, sel ? "#ffe36e" : "#2c5a5c");
+    r.R(x, y, w, h, sel ? "#1f4a50" : "#14343a");
+    r.text(ch.name, x + w / 2, y + 26, 24, sel ? "#ffe36e" : "#cfeff0", "center");
+    ctx.save(); ctx.translate(Math.round(x + w / 2 - 36), Math.round(y + 56));
+    r.sprite(ch.id, ctx, 1, game.clock * 4, true, sel ? 100 : 0, 3, game.clock);
+    ctx.restore();
+    ch.desc.forEach((s, k) => r.text(s, x + w / 2, y + 166 + k * 22, 15, "#fff", "center"));
+  },
   draw(r, game) {
     const W = CONFIG.width, mid = W / 2, t = Touch.enabled;
     if (game.state === "start") {
-      let y = r.panel(640, 400);
-      r.text("星芽快跑", mid, y + 60, 56, "#9bf0a8", "center");
-      r.text("戴護目鏡的植物探險家，穿越浮空溫室，抵達傳送門！", mid, y + 112, 18, "#cfeff0", "center");
-      const L = t
-        ? ["左下 ◀ ▶　移動", "右下「跳」　跳躍（放開可短跳）", "按住「跑」　奔跑", "右上 Ⅱ 暫停　↻ 重新開始", "踩敵人頭頂擊敗；碰到側面會受傷（2 點生命）", "從下方頂擊黃色方塊、收集能量種子"]
-        : ["A / D 或 ← →　移動", "Space 或 Z　跳躍（放開可短跳）", "Shift　奔跑", "P　暫停／繼續　　R　重新開始", "踩敵人頭頂擊敗；碰到側面會受傷（2 點生命）", "從下方頂擊黃色方塊、收集能量種子"];
-      L.forEach((s, i) => r.text(s, mid, y + 160 + i * 28, 18, "#fff", "center"));
-      if (Math.floor(game.clock * 2) % 2 === 0) r.text("按 Enter / Space 開始　（觸控：點擊畫面）", mid, y + 360, 22, "#ffe36e", "center");
+      r.panel(760, 460);
+      r.text("星芽快跑", mid, 84, 46, "#9bf0a8", "center");
+      r.text("選擇角色，穿越浮空溫室，抵達傳送門！", mid, 116, 16, "#cfeff0", "center");
+      this.card(r, game, 0, 170, 134, 300, 214);
+      this.card(r, game, 1, 490, 134, 300, 214);
+      r.R(340, 366, 280, 64, "#2c8a50"); r.R(344, 370, 272, 56, "#4fcf7a");
+      r.text("開始遊戲", mid, 398, 28, "#0d2a30", "center");
+      r.text(t ? "點選角色卡選擇，再按「開始遊戲」" : "←/→ 或 1/2 選角　Enter/Space 開始", mid, 452, 15, "#ffe36e", "center");
+      r.text(t ? "◀▶ 移動　跳　跑　攻（有 buff）　衝（刺客）" : "A/D 移動　Space/Z 跳　Shift 跑　X 攻擊　C 衝刺　P 暫停　R 重開", mid, 476, 14, "#cfeff0", "center");
     } else if (game.state === "paused") {
       let y = r.panel(460, 180);
       r.text("暫停中", mid, y + 60, 40, "#ffe36e", "center");
-      r.text(t ? "點擊畫面繼續" : "按 P 或 Space 繼續　／　R 重新開始", mid, y + 120, 20, "#fff", "center");
+      r.text(t ? "點擊畫面繼續" : "按 P 或 Space 繼續　／　R 重新開始　／　Q 選角", mid, y + 120, 18, "#fff", "center");
     } else if (game.state === "lose") {
-      let y = r.panel(520, 270);
+      let y = r.panel(520, 320);
       r.text("挑戰失敗", mid, y + 54, 44, "#ff7a6a", "center");
       r.text(game.loseReason, mid, y + 104, 20, "#cfeff0", "center");
-      r.text("分數 " + game.score + "　種子 " + game.seedCount + "/" + game.level.totalSeeds, mid, y + 150, 22, "#fff", "center");
-      r.text(t ? "點擊畫面重新開始" : "按 R 或 Enter 重新開始", mid, y + 210, 22, "#ffe36e", "center");
+      r.text("角色：" + game.character.name, mid, y + 144, 18, "#cfeff0", "center");
+      r.text("分數 " + game.score + "　種子 " + game.seedCount + "/" + game.level.totalSeeds, mid, y + 188, 22, "#fff", "center");
+      r.text(t ? "點擊畫面重新開始" : "按 R 或 Enter 重新開始", mid, y + 250, 22, "#ffe36e", "center");
+      r.text(t ? "［返回選角］" : "按 Q 返回選角", mid, 410, 18, "#9bf0a8", "center");
     } else if (game.state === "win") {
-      let y = r.panel(540, 310);
+      let y = r.panel(540, 360);
       r.text("通關成功！", mid, y + 54, 46, "#9bf0a8", "center");
       r.text("你抵達了傳送門", mid, y + 100, 20, "#cfeff0", "center");
-      r.text("分數 " + game.score, mid, y + 146, 24, "#fff", "center");
-      r.text("種子 " + game.seedCount + "/" + game.level.totalSeeds + "　剩餘生命 " + game.player.lives, mid, y + 180, 20, "#ffe36e", "center");
-      r.text("時間 " + game.time.toFixed(1) + " 秒", mid, y + 212, 20, "#cfeff0", "center");
-      r.text(t ? "點擊畫面再玩一次" : "按 R 或 Enter 再玩一次", mid, y + 262, 22, "#ffe36e", "center");
+      r.text("角色：" + game.character.name, mid, y + 134, 18, "#cfeff0", "center");
+      r.text("分數 " + game.score, mid, y + 172, 24, "#fff", "center");
+      r.text("種子 " + game.seedCount + "/" + game.level.totalSeeds + "　剩餘生命 " + game.player.lives, mid, y + 208, 20, "#ffe36e", "center");
+      r.text("時間 " + game.time.toFixed(1) + " 秒", mid, y + 240, 20, "#cfeff0", "center");
+      r.text(t ? "點擊畫面再玩一次" : "按 R 或 Enter 再玩一次", mid, y + 290, 22, "#ffe36e", "center");
+      r.text(t ? "［返回選角］" : "按 Q 返回選角", mid, 410, 18, "#9bf0a8", "center");
     }
   }
 };
